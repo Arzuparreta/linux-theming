@@ -1,0 +1,72 @@
+{
+  "repository": "https://gitlab.gnome.org/GNOME/gnome-backgrounds",
+  "commit": "df67ac68bd87b15457849f5a73a668a8c935aebb",
+  "attribution": "https://raw.githubusercontent.com/GNOME/gnome-backgrounds/df67ac68bd87b15457849f5a73a668a8c935aebb/AUTHORS",
+  "images": [
+    {
+      "file": "snowy-forest.jpg",
+      "upstream_file": "ColdWarm.jpg",
+      "author": "invisiblepower",
+      "license": "CC0-1.0",
+      "source": "https://raw.githubusercontent.com/GNOME/gnome-backgrounds/df67ac68bd87b15457849f5a73a668a8c935aebb/backgrounds/ColdWarm.jpg",
+      "source_sha256": "b31f8bd5f6f2a16d91fbb7644aeaaf1e6f1254213768cc6bc71151f1e142f1b1",
+      "sha256": "df50544ed99367745a421a8d229638417bb934bd716887e6c9fa7bcd065c49f8",
+      "size": [
+        1920,
+        1080
+      ]
+    },
+    {
+      "file": "dark-ivy.jpg",
+      "upstream_file": "Dark_Ivy.jpg",
+      "author": "Garrett LeSage",
+      "license": "CC-BY-SA-3.0",
+      "source": "https://raw.githubusercontent.com/GNOME/gnome-backgrounds/df67ac68bd87b15457849f5a73a668a8c935aebb/backgrounds/Dark_Ivy.jpg",
+      "source_sha256": "93670340609732e8a1ab078fe95904012a38689274ce36eaca8b85b1b412f998",
+      "sha256": "a7853d9f9e1db3430932ac90ef82f575526bdec1ddae0b4215e56ac345b155e5",
+      "size": [
+        1920,
+        1200
+      ]
+    },
+    {
+      "file": "light-waves.jpg",
+      "upstream_file": "LightWaves.jpg",
+      "author": "Skitterphoto",
+      "license": "CC0-1.0",
+      "source": "https://raw.githubusercontent.com/GNOME/gnome-backgrounds/df67ac68bd87b15457849f5a73a668a8c935aebb/backgrounds/LightWaves.jpg",
+      "source_sha256": "c05c28d1f6a374d26728076b5e2946121595e172f298ebb21ec1f7a4a7b8a56b",
+      "sha256": "6af80bde574ea505e0ff39ef47b81019075cc1c61862af0c2e405efa064a9221",
+      "size": [
+        1920,
+        1282
+      ]
+    },
+    {
+      "file": "forest-road.jpg",
+      "upstream_file": "Road.jpg",
+      "author": "Joshua Welch",
+      "license": "CC0-1.0",
+      "source": "https://raw.githubusercontent.com/GNOME/gnome-backgrounds/df67ac68bd87b15457849f5a73a668a8c935aebb/backgrounds/Road.jpg",
+      "source_sha256": "cc1207c730162b9cb00a5c7b62aeb9e671e59a911e778bea0eb4d599844ebf35",
+      "sha256": "d4a5f127a9ddc91acd6d630a275e637517d866e623110ff481c654aec920755a",
+      "size": [
+        1920,
+        1439
+      ]
+    },
+    {
+      "file": "sea-sunset.jpg",
+      "upstream_file": "SeaSunset.jpg",
+      "author": "Sebastian Voortman",
+      "license": "CC0-1.0",
+      "source": "https://raw.githubusercontent.com/GNOME/gnome-backgrounds/df67ac68bd87b15457849f5a73a668a8c935aebb/backgrounds/SeaSunset.jpg",
+      "source_sha256": "df7a52b652dc381ce7ddb20db2c229af2222f167193e02920919043a58087fac",
+      "sha256": "caa730050e6494580ee9a03239d180fa98586ace46e9e8463a46fe6d669ce74b",
+      "size": [
+        1920,
+        1280
+      ]
+    }
+  ]
+}

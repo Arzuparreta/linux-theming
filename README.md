@@ -11,6 +11,9 @@ preserving unrelated preferences.
 
 ![Linux Theming Theme page: an image library, the selected wallpaper with a sample bar and terminal in its generated palette, and the applied state](docs/screenshots/theme.png)
 
+Wallpaper: **Road** by Joshua Welch (CC0 1.0), from GNOME Backgrounds.
+[Photo credits, licenses and screenshot reproduction](docs/screenshots/README.md).
+
 **Current state:** a local PySide6 / Qt Quick application over the Python engine.
 Choose a palette, inspect components and color sources, review exact changes,
 apply, disconnect, export, undo and recover without configuration commands.

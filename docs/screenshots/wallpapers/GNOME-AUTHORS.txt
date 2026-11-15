@@ -1,0 +1,47 @@
+Image Authors:
+
+- adwaita*:
+- symbolics-1.jpg:
+- symbolics-2.jpg:
+- Endless-shapes.jpg:
+- Stripes.jpg:
+- Wood.jpg:
+
+  Copyright © 2011-2020 Jakub Steiner <jimmac@gmail.com>
+  Licensed under Creative Commons Attribution-ShareAlike 3.0 License.
+
+- Acrylic.jpg:
+  CC0, Photo by Steve Johnson, https://www.pexels.com/photo/color-splatter-painting-1698394/
+
+- Dark_Ivy.jpg:
+  Copyright © 2012 Garrett LeSage <glesage@gmail.com>
+  Licensed under Creative Commons Attribution-ShareAlike 3.0 License.
+
+- Blinds.jpg:
+  Copyright © 2008 Lennart Poettering <mztabzr@0pointer.de>
+  Copyright © 2008 Andrea Cimitan
+  Licensed under Creative Commons Attribution-ShareAlike 3.0 License.
+
+- FootFall.png:
+  Copyright © 2011 Nieves Sánchez Martínez <nievesanchez@hotmail.com>
+  Licensed under Creative Commons Attribution-ShareAlike 3.0 License.
+
+- LightWaves.jpg:
+  Skitterphoto, CC0, https://www.pexels.com/photo/blue-green-and-white-tilt-shift-lens-illustration-691467/
+
+- Icescape.jpg:
+  Copyright © 2016 Helena Bartošová
+  http://www.hbartosova.com/
+  Licensed under Creative Commons Attribution-ShareAlike 3.0 License.
+
+- Road.jpg:
+  CC0, Photo by Joshua Welch https://www.pexels.com/photo/bird-s-eye-view-of-roadway-surrounded-by-trees-1624600/
+
+- ColdWarm.jpg:
+  CC0, Photo by invisiblepower https://www.pexels.com/photo/above-aerial-bright-cold-343219/
+
+- SeaSunset.jpg:
+  CC0, Photo by Sebastian Voortman https://www.pexels.com/photo/beach-dawn-dusk-ocean-189349/
+
+- Fabric.jpg:
+  CC0, Author unknown. https://www.pexels.com/photo/blur-close-up-cloth-color-459486/
