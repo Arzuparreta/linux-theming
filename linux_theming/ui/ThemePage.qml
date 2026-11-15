@@ -6,7 +6,8 @@ import QtQuick.Layouts
 Item {
     id: page
     required property QtObject controller
-    readonly property var s: controller.state
+    readonly property var s: controller.viewState
+    readonly property var overview: controller.overview
     readonly property var folder: controller.imageFolder
     readonly property var preview: s.palette || ({})
     readonly property int imageCount: images.count
@@ -44,7 +45,7 @@ Item {
     }
     function fileName(path) { return path ? path.split("/").pop() : "" }
     function componentName(id) {
-        const item = s.overview.components.find(c => c.id === id)
+        const item = overview.components.find(c => c.id === id)
         return item ? item.name : id
     }
     function homePath(path) {

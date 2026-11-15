@@ -3,6 +3,9 @@
 The platform has a Python 3.11+ engine and a PySide6 / Qt Quick GUI.
 Pillow provides palette analysis. Qt remains optional for engine-only use.
 See [GUI workflows](GUI.md) and [AppImage packaging](APPIMAGE.md).
+The [CPU performance laboratory](PERFORMANCE.md) measures startup, UI event-loop
+gaps, worker work, native subprocesses and transaction latency under a shared
+resource cap, with reproducible disposable fixtures.
 MCP and a small fallback CLI for agents are future adapters.
 
 ## Layout

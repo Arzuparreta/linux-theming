@@ -93,7 +93,7 @@ def make_plan(paths, profile, *, which=None):
     profile = validate_profile(profile)
     previous = load_profile(paths)
     removed = set(previous["components"]) - set(profile["components"])
-    found = inventory.discover(paths, which=which)
+    found = inventory.discover(paths, which=which, components=profile["components"])
     available = {item["id"]: item for item in found["components"]}
     for component in profile["components"]:
         if available[component]["installed"] is False:

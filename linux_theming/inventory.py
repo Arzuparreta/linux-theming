@@ -142,7 +142,7 @@ def gtk_preferences(paths):
         return {}
 
 
-def discover(paths, *, running=None, which=None, environ=None):
+def discover(paths, *, running=None, which=None, environ=None, components=None):
     from . import appearance
 
     running = processes() if running is None else running
@@ -152,6 +152,8 @@ def discover(paths, *, running=None, which=None, environ=None):
                else current["name"]).lower().split(":")
     result = []
     for ident, name, category, commands, process_names, configs in COMPONENTS:
+        if components is not None and ident not in components:
+            continue
         files = [paths.config / file for file in configs]
         if ident in ("t3code", "tmux"):
             with contextlib.suppress(ValueError):

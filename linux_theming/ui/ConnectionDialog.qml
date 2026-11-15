@@ -9,7 +9,7 @@ Sheet {
     required property QtObject controller
     required property real windowWidth
     required property real windowHeight
-    readonly property var info: controller.state.connection
+    readonly property var info: controller.viewState.connection
     readonly property bool needsCopy: !!info.linked && !info.blocked
     readonly property bool needsReplace: !!info.existingColors && !info.blocked
     readonly property bool ready: (!info.linked || localCopy.checked) && (!info.existingColors || replaceColors.checked)
@@ -175,7 +175,7 @@ Sheet {
                 visible: !dialog.info.blocked
                 text: dialog.info.continueReview ? "Continue to review" : dialog.info.native ? "Use these preferences" : dialog.info.imageOnly ? "Use this image" : "Use the palette"
                 primary: true
-                enabled: !dialog.controller.state.busy && dialog.ready
+                enabled: !dialog.controller.viewState.busy && dialog.ready
                 onClicked: dialog.controller.confirmConnection(localCopy.checked, replaceColors.checked)
             }
         }

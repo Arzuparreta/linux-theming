@@ -50,6 +50,8 @@ class AppearanceTests(unittest.TestCase):
         operation = args[1]
         if operation == "list-keys":
             return "color-scheme\n" + ("accent-color" if self.accents else "")
+        if operation == "list-recursively":
+            return "\n".join(f"{args[2]} {key} {value!r}" for key, value in self.values.items())
         key = args[3]
         if operation == "range":
             choices = ("default", "prefer-dark", "prefer-light") if key == "color-scheme" else tuple(appearance.ACCENTS)
@@ -74,6 +76,20 @@ class AppearanceTests(unittest.TestCase):
 
     def setters(self):
         return [args for args in self.calls if args[1] == "set" or "-s" in args]
+
+    def test_batch_read_is_complete_and_keeps_native_values_and_scope(self):
+        action = {"backend": "gnome", "schema": "org.gnome.desktop.interface", "tool": "/fake/gsettings",
+                  "before": {"color-scheme": None, "accent-color": None}}
+        response = "org.gnome.desktop.interface color-scheme 'prefer dark'\n" + (
+            "org.gnome.desktop.interface accent-color 'blue'\n"
+            "org.unrelated accent-color 'red'\n"
+            "org.gnome.desktop.interface unrelated 'kept'\n")
+        with patch.object(appearance, "command", return_value=response) as command:
+            self.assertEqual(appearance.read(action), {"color-scheme": "prefer dark", "accent-color": "blue"})
+            command.assert_called_once_with(["/fake/gsettings", "list-recursively", action["schema"]])
+        for invalid in (response.splitlines()[0], response + response.splitlines()[0]):
+            with patch.object(appearance, "command", return_value=invalid), self.assertRaises(ValueError):
+                appearance.read(action)
 
     def test_gnome_inventory_review_apply_update_disconnect_and_undo(self):
         inventory.discover(self.paths, running={"gnome-shell"}, which=self.which)

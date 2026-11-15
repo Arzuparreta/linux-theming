@@ -23,7 +23,7 @@ def connection(paths, component, *, discovered=None):
     """Explain decisions before selecting an integration. Never grants permission."""
     if component not in inventory.SUPPORTED:
         raise ValueError("This application does not support theme changes yet.")
-    found = discovered if discovered is not None else inventory.discover(paths)
+    found = discovered if discovered is not None else inventory.discover(paths, components={component})
     item = next(c for c in found["components"] if c["id"] == component)
     report = item.get("configuration", {})
     issues = list(report.get("issues", []))

@@ -17,7 +17,7 @@ HAS_QT = importlib.util.find_spec("PySide6") is not None
 if HAS_QT:
     os.environ["QT_QPA_PLATFORM"] = "offscreen"
     os.environ["QT_QUICK_BACKEND"] = "software"
-    from PySide6.QtCore import QObject, QPoint, QSettings, Qt, QUrl, qInstallMessageHandler
+    from PySide6.QtCore import QObject, QPoint, QSettings, Qt, QTimer, QUrl, qInstallMessageHandler
     from PySide6.QtGui import QGuiApplication
     from PySide6.QtQml import QQmlApplicationEngine, QQmlExpression
     from PySide6.QtQuickControls2 import QQuickStyle
@@ -379,6 +379,49 @@ class GuiTests(unittest.TestCase):
         self.settle()
         self.assertFalse(self.controller.state["pending"])
 
+    def test_initial_profile_and_history_read_leaves_gui_event_loop_available(self):
+        from linux_theming import service
+
+        started, release = threading.Event(), threading.Event()
+        real_load = service.load_profile
+
+        def slow_load(paths):
+            started.set()
+            release.wait(5)
+            return real_load(paths)
+
+        other = Controller(self.paths)
+        ticks = []
+        try:
+            with patch.object(service, "load_profile", side_effect=slow_load):
+                try:
+                    other.startup()
+                    self.assertTrue(started.wait(1))
+                    self.assertFalse(other.state["loaded"])
+                    self.assertFalse(other.idle)
+                    # Initial reads must finish before an operation can write or
+                    # save navigation that a late bootstrap would then replace.
+                    writes = []
+                    other.start(lambda: writes.append(True), lambda _: None)
+                    other.chooseFolder(self.root.as_uri())
+                    self.assertFalse(other.state["busy"])
+                    self.assertFalse(other.state["folderLoading"])
+                    self.assertEqual(writes, [])
+                    QTimer.singleShot(0, lambda: ticks.append(True))
+                    self.app.processEvents()
+                    self.assertEqual(ticks, [True])
+                finally:
+                    release.set()
+                deadline = time.monotonic() + 10
+                while not other.idle and time.monotonic() < deadline:
+                    self.app.processEvents()
+                    QTest.qWait(10)
+                self.assertTrue(other.state["loaded"])
+                self.assertTrue(other.idle)
+        finally:
+            release.set()
+            other.shutdown()
+
     def test_history_preview_again_only_changes_the_draft(self):
         from PIL import Image
 
@@ -395,6 +438,41 @@ class GuiTests(unittest.TestCase):
         self.assertIn("no longer available", self.controller.state["notice"])
         self.assertFalse(self.paths.profile.exists())
         self.assertFalse(self.paths.state.exists())
+        self.assertEqual(self.messages, [])
+
+    def test_large_history_is_lazy_virtualized_and_not_republished_for_options(self):
+        self.settle()
+        overview = dict(self.controller.overview, history=[
+            {"id": f"fixture-{i}", "created": "2026-10-01T12:00:00Z", "status": "undone",
+             "components": [], "files": 1,
+             "theme": {"wallpaper": "", "mode": "safe", "polarity": "light"}} for i in range(1000)])
+        notifications = []
+        self.controller.overviewChanged.connect(lambda: notifications.append(True))
+        self.controller.publish(overview=overview)
+        self.app.processEvents()
+        self.assertIsNone(self.control("historyList"))
+        self.assertNotIn("overview", self.controller.viewState)
+        self.window.setProperty("page", 2)
+        self.app.processEvents()
+        history = self.control("historyList")
+        self.assertEqual(history.property("count"), 1000)
+        # Only viewport delegates exist; retaining every transaction is essential.
+        cards = [child for child in history.property("contentItem").childItems()
+                 if child.objectName().startswith("history-card-")]
+        self.assertLess(len(cards), 30)
+        self.assertGreater(len(cards), 0)
+        self.controller.setOption("polarity", "light")
+        self.settle()
+        self.assertEqual(len(notifications), 1)
+        self.assertEqual(history.property("count"), 1000)
+        expression = QQmlExpression(self.engine.rootContext(), history, "positionViewAtEnd()")
+        expression.evaluate()
+        self.assertFalse(expression.hasError())
+        self.app.processEvents()
+        self.assertGreater(self.control("history-card-999").height(), 0)
+        self.click("reuse-999")
+        self.assertEqual(self.controller.state["profile"]["mode"], "safe")
+        self.assertFalse(self.paths.profile.exists())
         self.assertEqual(self.messages, [])
 
     def test_daily_search_random_and_keyboard_review_do_not_apply_implicitly(self):
@@ -706,6 +784,9 @@ class GuiTests(unittest.TestCase):
                 return repr(UUID if args[3] == "default" else [UUID])
             if args[1] == "list-keys":
                 return "\n".join(values)
+            if args[1] == "list-recursively":
+                return "\n".join(f"{args[2].split(':', 1)[0]} {key} {str(value).lower() if isinstance(value, bool) else repr(value)}"
+                                 for key, value in values.items())
             if args[1] == "writable":
                 return "true"
             if args[1] == "get":
@@ -753,6 +834,8 @@ class GuiTests(unittest.TestCase):
         def command(args):
             if args[1] == "list-keys":
                 return "color-scheme"
+            if args[1] == "list-recursively":
+                return "\n".join(f"{args[2]} {key} {value!r}" for key, value in values.items())
             if args[1] == "range":
                 return "enum\n'default'\n'prefer-dark'\n'prefer-light'"
             if args[1] == "writable":

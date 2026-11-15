@@ -63,6 +63,15 @@ are loaded relative to the bundled module, not a source checkout or `/usr`.
 The palette resource `bin/walltheme` is included for its pure palette functions;
 its legacy application entry point and apply hooks are never invoked.
 
+Frozen QML loads through a Qt resource URL whose namespace is the SHA-256 of the
+UI paths and contents. AppImage mount directories change on each launch; file
+URLs inside those directories otherwise miss Qt's disk cache every time. The
+resource URL lets subsequent launches reuse their compiled QML cache, while a UI
+edit gets a different namespace. `scripts/build-qt-resources.py` uses the existing
+PySide6 `rcc` tool; the build downloads nothing. Source checkouts keep file URLs.
+The first launch with a new UI namespace still compiles QML. See the
+[CPU investigation](performance/2026-11-15-analysis.md) for cold/warm measurements.
+
 The AppDir carries the icon as a 256×256 PNG `.DirIcon`, the format file-manager
 thumbnailers and AppImage integration tools read, plus hicolor PNG/SVG theme
 icons. A file manager shows an AppImage's own icon only through such a
@@ -99,6 +108,9 @@ smoke testing and prints JSON milestones for QML creation, first rendered frame,
 first palette and usable controls. Timings start before Qt imports, after fixture
 creation. They exclude interpreter startup and AppImage mount/extraction, and
 do not establish p95 behavior or compositor focus on a real desktop.
+For a complete CPU investigation, use the [performance laboratory](PERFORMANCE.md),
+which also separates invocation/mount costs, inventory completion, UI event-loop
+gaps, image decoding, reviewed application and undo.
 
 ```sh
 APPIMAGE_EXTRACT_AND_RUN=1 dist/LinuxTheming-x86_64.AppImage --measure-startup --quick

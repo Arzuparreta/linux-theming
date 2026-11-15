@@ -11,6 +11,7 @@ from pathlib import Path
 
 _LOCK = threading.RLock()
 _PREVIEWS = OrderedDict()
+_ANALYSES = OrderedDict()
 MAX_PREVIEWS = 32
 
 
@@ -61,7 +62,18 @@ def palette(profile, *, cached=False):
         if key in _PREVIEWS:
             _PREVIEWS.move_to_end(key)
             return copy.deepcopy(_PREVIEWS[key])
-    value = _palette(profile)
+    analysis_key = (module, identity)
+    with _LOCK:
+        analysis = _ANALYSES.get(analysis_key)
+        if analysis is not None:
+            _ANALYSES.move_to_end(analysis_key)
+            analysis = copy.deepcopy(analysis)
+    if analysis is None and profile["wallpaper"]:
+        try:
+            analysis = module.Analysis(profile["wallpaper"])
+        except Exception as exc:
+            raise ValueError(f"Cannot read wallpaper: {exc}") from exc
+    value = _palette(profile, analysis=analysis)
     try:
         unchanged = identity == image_identity(profile["wallpaper"])
     except OSError:
@@ -69,12 +81,16 @@ def palette(profile, *, cached=False):
     if unchanged:
         with _LOCK:
             _PREVIEWS[key] = copy.deepcopy(value)
+            if analysis is not None:
+                _ANALYSES[analysis_key] = copy.deepcopy(analysis)
+                while len(_ANALYSES) > MAX_PREVIEWS:
+                    _ANALYSES.popitem(last=False)
             while len(_PREVIEWS) > MAX_PREVIEWS:
                 _PREVIEWS.popitem(last=False)
     return value
 
 
-def _palette(profile):
+def _palette(profile, *, analysis=None):
     module = engine()
     image = profile["wallpaper"]
     if image:
@@ -82,7 +98,8 @@ def _palette(profile):
         if not path.is_file():
             raise ValueError("Wallpaper is not a readable file.")
         try:
-            analysis = module.Analysis(str(path))
+            if analysis is None:
+                analysis = module.Analysis(str(path))
         except Exception as exc:
             raise ValueError(f"Cannot read wallpaper: {exc}") from exc
         scheme, reason = module.build(str(path), profile["mode"], profile["polarity"], analysis=analysis)
