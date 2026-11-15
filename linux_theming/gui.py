@@ -54,6 +54,7 @@ class Work(QRunnable):
 
 class Controller(QObject):
     changed = Signal()
+    overviewChanged = Signal()
     folderChanged = Signal()
     # Emitted just before a watched folder's listing is replaced in place, so the
     # list can keep its scroll position instead of jumping to the selection.
@@ -107,6 +108,16 @@ class Controller(QObject):
     def state(self):
         return self._state
 
+    @Property("QVariantMap", notify=changed)
+    def viewState(self):
+        # QML converts a QVariantMap recursively on every notification. Inventory
+        # and history can be large and do not change when a palette/busy flag does.
+        return {key: value for key, value in self._state.items() if key != "overview"}
+
+    @Property("QVariantMap", notify=overviewChanged)
+    def overview(self):
+        return self._state["overview"]
+
     @Property("QVariantMap", notify=folderChanged)
     def imageFolder(self):
         # A separate notification keeps the list and scroll position stable while
@@ -141,10 +152,12 @@ class Controller(QObject):
             values["wallpaperUrl"] = QUrl.fromLocalFile(image).toString() if image else ""
         self._state.update(values)
         self._state["pending"] = self._state["profile"] != self._state["applied"]
+        if "overview" in values:
+            self.overviewChanged.emit()
         self.changed.emit()
 
     def start(self, operation, complete, *, clear_notice=True, context="refresh"):
-        if self._state["busy"]:
+        if self._state["busy"] or "bootstrapping" in self._reads:
             return
         self.invalidate_preview()
         self._context = context
@@ -234,24 +247,33 @@ class Controller(QObject):
     def bootstrap(self):
         if self._state["loaded"]:
             return True
-        try:
-            applied = copy.deepcopy(service.load_profile(self.paths))
+        if "bootstrapping" in self._reads:
+            return False
+
+        def operation():
+            return copy.deepcopy(service.load_profile(self.paths)), changes.history(self.paths)
+
+        def complete(value):
+            applied, history = value
             profile = copy.deepcopy(applied)
             remembered = self._navigation.get("wallpaper", "")
             if remembered and Path(remembered).is_file():
                 profile["wallpaper"] = remembered
             if not self.paths.profile.exists():
                 profile["set_wallpaper"] = True
-            overview = dict(self._state["overview"], profile=applied, history=changes.history(self.paths))
+            overview = dict(self._state["overview"], profile=applied, history=history)
             self.publish(profile=profile, applied=applied, overview=overview, loaded=True)
             folder = self._navigation.get("folder", "")
             if folder and Path(folder).is_dir():
                 self.chooseFolder(QUrl.fromLocalFile(folder).toString(), remember=False)
             self.timer.start()
-            return True
-        except (ValueError, OSError) as exc:
-            self.publish(error=str(exc), problem=presentation.problem("refresh", str(exc)))
-            return False
+            self.refresh()
+            self.refreshLauncher()
+
+        # Reading a growing history must not delay the first QML frame. Editing
+        # stays unavailable until this read completes; no recovery data is skipped.
+        self.read("bootstrapping", operation, complete)
+        return False
 
     @Slot()
     def startup(self):
@@ -356,7 +378,7 @@ class Controller(QObject):
 
     @Slot(str)
     def chooseFolder(self, url, remember=True):
-        if self._state["busy"]:
+        if self._state["busy"] or "bootstrapping" in self._reads:
             return
         local = QUrl(url).toLocalFile()
         if not local:
@@ -563,7 +585,7 @@ class Controller(QObject):
         profile = copy.deepcopy(self._state["profile"])
 
         def operation():
-            discovered = inventory.discover(self.paths)
+            discovered = inventory.discover(self.paths, components=profile["components"])
             for component in profile["components"]:
                 info = presentation.connection(self.paths, component, discovered=discovered)
                 if presentation.needs_decision(info, profile):

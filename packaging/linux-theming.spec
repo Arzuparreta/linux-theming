@@ -17,6 +17,8 @@ analysis = Analysis(
     pathex=[str(root)],
     hookspath=[str(root / "packaging/hooks")],
     datas=[(str(root / 'linux_theming/ui'), 'linux_theming/ui'),
+           (str(root / 'build/qt-resources/ui.rcc'), 'linux_theming'),
+           (str(root / 'build/qt-resources/ui-resources.json'), 'linux_theming'),
            (str(root / 'bin/walltheme'), 'bin')] + notices,
     hiddenimports=['PIL.Image', 'PIL.ImageOps', 'PIL.ImageStat'],
     excludes=['PySide6.QtWebEngineCore', 'PySide6.QtWebEngineQuick',

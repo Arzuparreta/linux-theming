@@ -9,7 +9,7 @@ Sheet {
     required property QtObject controller
     required property real windowWidth
     required property real windowHeight
-    readonly property var s: controller.state
+    readonly property var s: controller.viewState
     readonly property var review: s.review || ({})
     // The user's own files first, then the app's generated themes and restoration records.
     readonly property var changes: {

@@ -52,6 +52,9 @@ class TerminalAppearanceTests(unittest.TestCase):
         self.assertIn(':' + self.uuid + '/', schema)
         if operation == 'list-keys':
             return '\n'.join(self.values)
+        if operation == 'list-recursively':
+            return '\n'.join(f"{schema.split(':', 1)[0]} {key} {str(value).lower() if isinstance(value, bool) else repr(value)}"
+                             for key, value in self.values.items())
         key = args[3]
         if operation == 'get':
             value = self.values[key]

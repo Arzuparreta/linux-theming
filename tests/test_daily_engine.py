@@ -24,6 +24,7 @@ class DailyEngineTests(unittest.TestCase):
         self.profile = dict(service.DEFAULT_PROFILE, wallpaper=str(self.image))
         with theme._LOCK:
             theme._PREVIEWS.clear()
+            theme._ANALYSES.clear()
 
     def test_one_analysis_and_legacy_palette_output_are_preserved(self):
         module = theme.engine()
@@ -55,10 +56,25 @@ class DailyEngineTests(unittest.TestCase):
             theme.palette(self.profile, cached=True)
             self.assertEqual(analysis.call_count, 2)
             theme.palette(dict(self.profile, polarity="light"), cached=True)
-            self.assertEqual(analysis.call_count, 3)
+            self.assertEqual(analysis.call_count, 2)
+            # Polarity changes reuse the expensive image analysis, with identical
+            # output to a fresh review. Content changes above still invalidate it.
+            for mode in ("adaptive", "safe"):
+                for polarity in ("dark", "light"):
+                    profile = dict(self.profile, mode=mode, polarity=polarity)
+                    self.assertEqual(theme.palette(profile, cached=True), theme.palette(profile))
         with patch.object(theme, "MAX_PREVIEWS", 1):
+            Image.new("RGB", (32, 32), "yellow").save(self.image)
             theme.palette(dict(self.profile, mode="safe"), cached=True)
             self.assertEqual(len(theme._PREVIEWS), 1)
+            self.assertEqual(len(theme._ANALYSES), 1)
+
+    def test_targeted_discovery_does_not_inspect_unrelated_configuration(self):
+        with patch.object(inventory.integrations, "inspect", side_effect=AssertionError("Unrelated file adapter")):
+            found = inventory.discover(self.paths, components={"kitty"}, running=set(), which=lambda _: None)
+        self.assertEqual([item["id"] for item in found["components"]], ["kitty"])
+        # Empty selections are valid: planning a palette need not inspect all apps.
+        self.assertEqual(inventory.discover(self.paths, components=[], running=set())["components"], [])
 
     def test_fresh_plans_never_use_preview_cache(self):
         theme.palette(self.profile, cached=True)

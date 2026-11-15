@@ -6,13 +6,18 @@ import QtQuick.Dialogs
 ApplicationWindow {
     id: window
     required property QtObject controller
-    readonly property var s: controller.state
+    readonly property var s: controller.viewState
+    readonly property var overview: controller.overview
     readonly property var imageFolder: controller.imageFolder
     readonly property int folderImageCount: themePage.imageCount
     // Quick mode: opened to change the theme. Starts on the Theme page with
     // search focused; Escape closes the window without applying anything.
     property bool dailyMode: false
     property int page: 0
+    onPageChanged: {
+        if (page === 1) applicationsLoader.active = true
+        if (page === 2) historyLoader.active = true
+    }
     readonly property bool canNavigate: !s.busy && s.loaded && !reviewDialog.visible && !inspector.visible && !exportDialog.visible && !connectionDialog.visible && !accessDialog.visible && !activationDialog.visible && !shortcutsDialog.visible && !moreMenu.visible && !wallpaperPicker.visible && !folderPicker.visible && !exportPicker.visible
     onDailyModeChanged: {
         if (dailyMode) page = 0
@@ -21,12 +26,12 @@ ApplicationWindow {
     Component.onCompleted: if (dailyMode) { width = 980; Qt.callLater(themePage.focusSearch) }
     property var inspected: ({})
     property bool problemDetails: false
-    readonly property string latestActive: (s.overview.history.filter(h => ["applied", "prepared", "recovery-needed", "undoing"].indexOf(h.status) >= 0)[0] || ({})).id || ""
-    readonly property bool recoveryNeeded: s.overview.history.some(h => ["prepared", "recovery-needed", "undoing"].indexOf(h.status) >= 0)
+    readonly property string latestActive: (overview.history.filter(h => ["applied", "prepared", "recovery-needed", "undoing"].indexOf(h.status) >= 0)[0] || ({})).id || ""
+    readonly property bool recoveryNeeded: overview.history.some(h => ["prepared", "recovery-needed", "undoing"].indexOf(h.status) >= 0)
     readonly property bool compactHeader: width < 900
     readonly property var addedApps: s.hasApplied ? s.profile.components.filter(id => s.applied.components.indexOf(id) < 0) : []
     readonly property var removedApps: s.hasApplied ? s.applied.components.filter(id => s.profile.components.indexOf(id) < 0) : []
-    function componentName(id) { const c = s.overview.components.find(item => item.id === id); return c ? c.name : id }
+    function componentName(id) { const c = overview.components.find(item => item.id === id); return c ? c.name : id }
     function themeName(t) { return t ? (t.wallpaper ? fileName(t.wallpaper) : "Default colors") + " · " + (t.polarity === "light" ? "Light" : "Dark") : "" }
     width: 1120
     height: 780
@@ -68,9 +73,9 @@ ApplicationWindow {
     }
     function inspect(c) { inspected = c; inspector.open() }
     function sessionName() {
-        const active = s.overview.components.find(c => c.current_session)
-        const desktop = active ? active.name : s.overview.session.desktop
-        const type = s.overview.session.type
+        const active = overview.components.find(c => c.current_session)
+        const desktop = active ? active.name : overview.session.desktop
+        const type = overview.session.type
         return (desktop && desktop !== "Unknown" ? desktop : "Desktop") + (type && type !== "unknown" ? " · " + (type === "x11" ? "X11" : type.charAt(0).toUpperCase() + type.slice(1)) : "")
     }
     function handleProblem() {
@@ -310,15 +315,22 @@ ApplicationWindow {
                 onExportRequested: window.openExport()
                 onUndoRequested: if (window.latestActive && !window.recoveryNeeded && window.canNavigate) controller.undoLatest()
             }
-            ApplicationsPage {
-                id: applicationsPage
-                controller: window.controller
-                onDetailsRequested: function(component) { window.inspect(component) }
+            Loader {
+                id: applicationsLoader
+                active: false
+                sourceComponent: ApplicationsPage {
+                    controller: window.controller
+                    onDetailsRequested: function(component) { window.inspect(component) }
+                }
             }
-            HistoryPage {
-                controller: window.controller
-                latestActive: window.latestActive
-                onPreviewRequested: function(wallpaper, polarity, mode) { window.controller.previewTheme(wallpaper, polarity, mode); window.page = 0 }
+            Loader {
+                id: historyLoader
+                active: false
+                sourceComponent: HistoryPage {
+                    controller: window.controller
+                    latestActive: window.latestActive
+                    onPreviewRequested: function(wallpaper, polarity, mode) { window.controller.previewTheme(wallpaper, polarity, mode); window.page = 0 }
+                }
             }
         }
 
@@ -616,7 +628,7 @@ ApplicationWindow {
                     id: exportFormat
                     objectName: "exportFormat"
                     Layout.preferredWidth: 260
-                    model: s.overview.components.filter(c => c.supported && ["gnome", "xfce"].indexOf(c.id) < 0)
+                    model: overview.components.filter(c => c.supported && ["gnome", "xfce"].indexOf(c.id) < 0)
                     textRole: "name"
                     enabled: !s.busy
                     onActivated: controller.renderExport(model[currentIndex].id)

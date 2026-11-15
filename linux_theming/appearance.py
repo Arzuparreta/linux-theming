@@ -37,8 +37,21 @@ def read(action):
         if uuid != action["profile_uuid"]:
             raise ValueError("GNOME Terminal default profile changed; return to the reviewed profile before updating or undoing.")
     if action["backend"] in ("gnome", "gnome-terminal"):
-        return {key: native_value(command([action["tool"], "get", action["schema"], key]))
-                for key in action["before"]}
+        # One fresh process reads every managed key. Keep the full-state check
+        # before EACH write, without spawning a process for every individual key.
+        schema = action["schema"].split(":", 1)[0]
+        values = {}
+        for line in command([action["tool"], "list-recursively", action["schema"]]).splitlines():
+            fields = line.split(None, 2)
+            if len(fields) != 3 or fields[0] != schema or fields[1] not in action["before"]:
+                continue
+            key = fields[1]
+            if key in values:
+                raise ValueError("Duplicate native preference in settings response.")
+            values[key] = native_value(fields[2])
+        if set(values) != set(action["before"]):
+            raise ValueError("Native preferences are missing from the settings response; your settings are preserved.")
+        return values
     if action["backend"] == "xfce":
         from . import inventory
 

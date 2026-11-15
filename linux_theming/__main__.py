@@ -9,6 +9,7 @@ USAGE = """Usage: linux-theming [--quick | --center]
   --quick    open the compact daily view
   --center   open the full control center
   --measure-startup  print timing milestones in an isolated diagnostic fixture
+  --performance-probe  lab-only probe (see docs/PERFORMANCE.md)
   --version  print the source version
 
 Without either option, the daily view opens once a theme has been applied and the
@@ -43,6 +44,10 @@ def activated(root, controller, request, notice, token):
 
 def main():
     arguments = sys.argv[1:]
+    if "--performance-probe" in arguments:
+        from .performance import run
+
+        return run(arguments[arguments.index("--performance-probe") + 1:])
     if "--version" in arguments:
         from . import __version__
 
@@ -68,7 +73,6 @@ def main():
     started = time.perf_counter()
 
     try:
-        from PySide6.QtCore import QUrl
         from PySide6.QtGui import QGuiApplication, QIcon
         from PySide6.QtQml import QQmlApplicationEngine
         from PySide6.QtQuickControls2 import QQuickStyle
@@ -78,6 +82,7 @@ def main():
     from . import instance
     from .gui import Controller
     from .paths import Paths
+    from .resources import main_url
 
     claimed = None
     if not diagnostic:
@@ -115,7 +120,7 @@ def main():
     engine = QQmlApplicationEngine()
     engine.setInitialProperties({"controller": controller,
                                  "dailyMode": daily_mode(intent, controller.paths)})
-    engine.load(QUrl.fromLocalFile(str(Path(__file__).parent / "ui/Main.qml")))
+    engine.load(main_url())
     if not engine.rootObjects():
         if server is not None:
             server.close()

@@ -7,7 +7,8 @@ import QtQuick.Layouts
 ScrollView {
     id: page
     required property QtObject controller
-    readonly property var s: controller.state
+    readonly property var s: controller.viewState
+    readonly property var overview: controller.overview
     property bool showAll: false
     signal detailsRequested(var component)
     contentWidth: availableWidth
@@ -15,10 +16,10 @@ ScrollView {
 
     function selected(id) { return s.profile.components.indexOf(id) >= 0 }
     function group(c) { return c.running || c.current_session ? 0 : c.installed === true ? 1 : 2 }
-    readonly property var visibleComponents: s.overview.components.filter(c => c.supported || showAll || c.installed || c.running || c.configs.some(f => f.exists))
-    readonly property int hiddenCount: s.overview.components.length - visibleComponents.length
-    readonly property var connecting: s.overview.components.filter(c => selected(c.id) && !c.managed).map(c => c.name)
-    readonly property var restoring: s.overview.components.filter(c => !selected(c.id) && c.managed).map(c => c.name)
+    readonly property var visibleComponents: overview.components.filter(c => c.supported || showAll || c.installed || c.running || c.configs.some(f => f.exists))
+    readonly property int hiddenCount: overview.components.length - visibleComponents.length
+    readonly property var connecting: overview.components.filter(c => selected(c.id) && !c.managed).map(c => c.name)
+    readonly property var restoring: overview.components.filter(c => !selected(c.id) && c.managed).map(c => c.name)
 
     function description(c) {
         if (c.wallpaper_provider && !c.supported) return "Used by the wallpaper option on the Theme page when it is compatible with your session."

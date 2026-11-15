@@ -18,6 +18,7 @@ if [[ ! -f "$appimage_runtime" ]]; then
     exit 1
 fi
 cd "$repo"
+"$python_bin" scripts/build-qt-resources.py --output build/qt-resources
 "$python_bin" -m PyInstaller --noconfirm --clean packaging/linux-theming.spec
 appdir="$repo/build/LinuxTheming.AppDir"
 # Only remove our generated directory, never a caller-supplied path.
