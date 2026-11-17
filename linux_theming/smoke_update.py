@@ -119,11 +119,12 @@ def run(*, network=False):
                     raise ValueError("A rejected download changed or left files beside the AppImage")
                 mode["corrupt"] = False
                 result = updates.install(paths, release, target(), environ=environ)
-                kept = updates.read_previous(paths)
+                # The loopback release is this same version, so name another one as installed.
+                kept = updates.read_previous(paths, current="0.0.1")
                 if (_sha256(installed) != digest or not os.access(installed, os.X_OK)
                         or kept.get("version") != __version__ or result["version"] != __version__):
                     raise ValueError("The verified update was not installed with a kept copy")
-                restored = updates.restore(paths, target())
+                restored = updates.restore(paths, target(), current="0.0.1")
                 if restored["version"] != __version__ or _sha256(installed) != digest:
                     raise ValueError("The kept copy was not restored")
                 if list(installed.parent.glob(".*")):

@@ -8,6 +8,7 @@ import os
 import ssl
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -43,6 +44,7 @@ class Release(http.server.ThreadingHTTPServer):
         self.extra = {}
         self.asset_url = None
         self.length = None
+        self.slow = False
         self.status = 200
         self.headers = {}
         self.requests = []
@@ -93,7 +95,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(server.length if server.length is not None else len(body)))
         self.end_headers()
         with contextlib.suppress(OSError):
-            self.wfile.write(body)
+            if server.slow:  # A connection that trickles data and never times out.
+                for start in range(0, len(body), 1024):
+                    self.wfile.write(body[start:start + 1024])
+                    self.wfile.flush()
+                    time.sleep(0.02)
+            else:
+                self.wfile.write(body)
 
 
 class UpdateTests(unittest.TestCase):
@@ -369,16 +377,58 @@ class UpdateTests(unittest.TestCase):
         self.install()
         self.assertEqual(self.leftovers(), [])
 
+    def kept_files(self):
+        return sorted(path.name for path in (updates.directory(self.paths) / "previous").iterdir())
+
     def test_restore_switches_back_and_keeps_the_replaced_version(self):
         self.install()
-        restored = updates.restore(self.paths, self.target())
+        restored = updates.restore(self.paths, self.target(), current="9.0.0")
         self.assertEqual(restored["version"], "8.0.0")
         self.assertIn(b"old", self.installed.read_bytes()[:16])
-        kept = updates.read_previous(self.paths)
+        kept = updates.read_previous(self.paths, "8.0.0")
         self.assertEqual(kept["version"], "9.0.0")
         self.assertEqual(Path(kept["path"]).read_bytes(), self.server.body)
-        self.assertEqual(len(list(Path(kept["path"]).parent.iterdir())), 1)
+        machine = updates.platform.machine()
+        self.assertEqual(self.kept_files(), [f"LinuxTheming-9.0.0-{machine}.AppImage", f"LinuxTheming-9.0.0-{machine}.json"])
+        self.assertEqual(updates.read_previous(self.paths, "9.0.0"), {})  # Never offer the installed version.
         self.assertEqual(self.leftovers(), [])
+
+    def test_failed_switch_keeps_the_way_back(self):
+        self.install()
+        with (patch("linux_theming.updates._replace", side_effect=OSError(5, "Input/output error")),
+              self.assertRaises(OSError)):
+            updates.restore(self.paths, self.target(), current="9.0.0")
+        self.assertEqual(self.installed.read_bytes(), self.server.body)
+        self.assertEqual(updates.read_previous(self.paths, "9.0.0")["version"], "8.0.0")
+        self.assertEqual(len(self.kept_files()), 2)
+        self.assertEqual(self.leftovers(), [])
+
+    def test_interruption_after_replacing_keeps_both_versions(self):
+        self.install()
+        with patch("linux_theming.updates._commit_previous"):  # The process ends right after the rename.
+            updates.restore(self.paths, self.target(), current="9.0.0")
+        self.assertIn(b"old", self.installed.read_bytes()[:16])
+        self.assertEqual(len(self.kept_files()), 4)
+        # Whichever version is installed, the other one is offered.
+        self.assertEqual(updates.read_previous(self.paths, "8.0.0")["version"], "9.0.0")
+        self.assertEqual(updates.read_previous(self.paths, "9.0.0")["version"], "8.0.0")
+        updates.restore(self.paths, self.target(), current="8.0.0")
+        self.assertEqual(self.installed.read_bytes(), self.server.body)
+        self.assertEqual(len(self.kept_files()), 2)
+
+    def test_too_slow_downloads_stop(self):
+        self.server.slow = True
+        with (patch.multiple(updates, SLOW_WINDOW=0.3, SLOW_BYTES=1 << 30),
+              self.assertRaisesRegex(updates.UpdateError, "too slow")):
+            self.install()
+        self.assertEqual(self.leftovers(), [])
+
+    def test_cancelling_a_trickling_download_is_prompt(self):
+        self.server.slow = True
+        started = time.monotonic()
+        with self.assertRaises(updates.Cancelled):
+            self.install(cancelled=lambda: time.monotonic() - started > 0.3)
+        self.assertLess(time.monotonic() - started, 5)
 
     def test_restore_rejects_a_changed_kept_copy(self):
         self.install()
@@ -387,7 +437,7 @@ class UpdateTests(unittest.TestCase):
             stream.seek(20)
             stream.write(b"tampered")
         with self.assertRaisesRegex(updates.UpdateError, "changed since it was saved"):
-            updates.restore(self.paths, self.target())
+            updates.restore(self.paths, self.target(), current="9.0.0")
         self.assertEqual(self.installed.read_bytes(), self.server.body)
 
     def test_discard_previous(self):
@@ -448,6 +498,52 @@ class UpdateTests(unittest.TestCase):
         script.write_text("#!/bin/sh\necho broken >&2\nexit 3\n")
         with self.assertRaisesRegex(updates.UpdateError, "did not start on this computer: broken"):
             self.real_program_version(script, scratch=self.root)
+
+    def test_probe_timeout_and_cancel_stop_every_process_it_started(self):
+        script = self.root / "stalls"
+        pids = self.root / "pids"
+        script.write_text(f'#!/bin/sh\nsleep 60 &\necho $! > "{pids}"\nsleep 60\n')
+        script.chmod(0o700)
+        for options, error in (({"timeout": 1}, "did not start within 1 seconds"),
+                               ({"cancelled": lambda: True}, "cancelled")):
+            with self.subTest(error=error):
+                started = time.monotonic()
+                with self.assertRaisesRegex(updates.UpdateError, error):
+                    self.real_program_version(script, scratch=self.root, **options)
+                self.assertLess(time.monotonic() - started, 10)
+                child = int(pids.read_text())
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    try:
+                        os.kill(child, 0)
+                    except ProcessLookupError:
+                        break
+                    if Path(f"/proc/{child}/stat").read_text().split()[2] == "Z":
+                        break  # Exited; only awaiting its new parent.
+                    time.sleep(0.05)
+                else:
+                    self.fail("The probe's child process survived")
+                self.assertEqual(list(self.root.glob("probe-*")), [])
+
+    def test_relaunch_starts_the_file_after_the_requesting_process_exits(self):
+        marker = self.root / "relaunched"
+        program = self.root / "LinuxTheming.AppImage"
+        program.write_text(f'#!/bin/sh\necho "$@" > "{marker}"\n')
+        program.chmod(0o700)
+        code = ("import sys, time; from linux_theming import updates; "
+                f"updates.relaunch({{'path': {str(program)!r}}}, ['--center']); "
+                "print('ready', flush=True); time.sleep(1)")
+        parent = subprocess.Popen([sys.executable, "-c", code], cwd=Path(__file__).resolve().parents[1],
+                                  stdout=subprocess.PIPE, text=True)
+        self.assertEqual(parent.stdout.readline().strip(), "ready")
+        time.sleep(0.3)
+        self.assertFalse(marker.exists())  # Not while the requesting process runs.
+        parent.wait(10)
+        parent.stdout.close()
+        deadline = time.monotonic() + 10
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(marker.read_text().strip(), "--center")
 
     def test_relaunch_waits_for_this_process_then_starts_the_appimage(self):
         calls = []

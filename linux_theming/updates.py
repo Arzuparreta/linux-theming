@@ -26,10 +26,12 @@ import pwd
 import re
 import secrets
 import shutil
+import signal
 import ssl
 import stat
 import subprocess
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -49,7 +51,10 @@ MIN_SIZE, MAX_SIZE = 1 << 20, 1 << 30
 METADATA_LIMIT = 2 << 20
 CHECKSUM_LIMIT = 4096
 CHUNK = 1 << 16
-TIMEOUT = 30
+TIMEOUT = 30  # Longest wait for any network answer, and so for a cancel to take effect.
+# A connection that trickles data never reaches the socket timeout. Below this rate
+# over a whole window the download stops (64 KiB per minute, about 1 KB/s).
+SLOW_WINDOW, SLOW_BYTES = 60, 64 << 10
 PROBE_TIMEOUT = 180  # Extract-and-run unpacks the whole payload before it can answer.
 RESERVE = 32 << 20  # Free space kept beyond the files written.
 CHECK_INTERVAL = timedelta(hours=24)
@@ -376,7 +381,22 @@ def child_environment(environ=None):
     return env
 
 
-def program_version(path, *, extract_and_run=False, scratch=None, timeout=PROBE_TIMEOUT, what="downloaded program"):
+def _terminate(process):
+    """Stop the probe and everything it started (the runtime forks the payload)."""
+    for sig, wait in ((signal.SIGTERM, 3), (signal.SIGKILL, 5)):
+        try:
+            os.killpg(process.pid, sig)
+        except (ProcessLookupError, PermissionError):
+            break
+        try:
+            process.wait(wait)
+            break
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def program_version(path, *, extract_and_run=False, scratch=None, timeout=PROBE_TIMEOUT, what="downloaded program",
+                    cancelled=lambda: False):
     """Start an AppImage with --version in a throwaway HOME/XDG and return its answer."""
     # The runtime may still be unmounting its FUSE directory when the program has
     # answered; a cleanup failure must not turn a verified answer into an error.
@@ -391,27 +411,45 @@ def program_version(path, *, extract_and_run=False, scratch=None, timeout=PROBE_
             env["TMPDIR"] = str(root)
         command = [str(path)] + (["--appimage-extract-and-run"] if extract_and_run else []) + ["--version"]
         try:
-            result = subprocess.run(command, cwd=root, env=env, stdin=subprocess.DEVNULL, capture_output=True,
-                                    timeout=timeout, close_fds=True, check=False)
-        except subprocess.TimeoutExpired:
-            raise UpdateError(f"The {what} did not start within {timeout} seconds. Nothing was replaced.") from None
+            # Its own session: on timeout or cancel the whole process group is stopped
+            # before the scratch directory is removed.
+            process = subprocess.Popen(command, cwd=root, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE, close_fds=True, start_new_session=True)
         except OSError as exc:
             raise UpdateError(f"The {what} could not be started: {exc.strerror}. Nothing was replaced.") from None
-    lines = result.stdout.decode("utf-8", "replace").split()
-    if result.returncode != 0 or not lines:
-        detail = result.stderr.decode("utf-8", "replace").strip()[-600:]
+        deadline = time.monotonic() + timeout
+        with process:  # Closes the pipes on every path.
+            try:
+                while True:
+                    try:
+                        stdout, stderr = process.communicate(timeout=0.5)
+                        break
+                    except subprocess.TimeoutExpired:
+                        if cancelled():
+                            raise Cancelled("The update was cancelled. Nothing was replaced.") from None
+                        if time.monotonic() > deadline:
+                            raise UpdateError(f"The {what} did not start within {timeout} seconds. "
+                                              "Nothing was replaced.") from None
+            except BaseException:
+                _terminate(process)
+                raise
+    lines = stdout.decode("utf-8", "replace").split()
+    if process.returncode != 0 or not lines:
+        detail = stderr.decode("utf-8", "replace").strip()[-600:]
         raise UpdateError(f"The {what} did not start on this computer"
                           + (f": {detail}" if detail else ".") + " Nothing was replaced.")
     return lines[-1]
 
 
-def _verify_program(path, version, identity, *, extract_and_run, scratch, what="downloaded program"):
+def _verify_program(path, version, identity, *, extract_and_run, scratch, what="downloaded program",
+                    cancelled=lambda: False):
     with open(path, "rb") as stream:
         head = stream.read(11)
     if head[:4] != b"\x7fELF" or head[8:11] != b"AI\x02":
         raise UpdateError(f"The {what} is not a type 2 AppImage. Nothing was replaced.")
     _same_staged(path, identity, 0o700)
-    answered = program_version(path, extract_and_run=extract_and_run, scratch=scratch, what=what)
+    answered = program_version(path, extract_and_run=extract_and_run, scratch=scratch, what=what,
+                               cancelled=cancelled)
     if answered != version:
         raise UpdateError(f"The {what} reports version {answered!r}, not {version}. "
                           "Nothing was replaced.")
@@ -452,20 +490,30 @@ def _copy_hashed(stream, staged, size, *, progress, cancelled, phase, what="AppI
         fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     except OSError as exc:
         raise UpdateError(f"{staged} cannot be created: {exc.strerror}. Nothing was replaced.") from None
+    read = getattr(stream, "read1", stream.read)  # Returns what has arrived, so cancel is checked often.
+    window_start, window_bytes = time.monotonic(), 0
     with os.fdopen(fd, "wb") as output:
         written = os.fstat(output.fileno())
         while True:
             if cancelled():
                 raise Cancelled("The update was cancelled. Nothing was replaced.")
             try:
-                block = stream.read(CHUNK)
+                block = read(CHUNK)
             except (OSError, http.client.HTTPException) as exc:
+                if cancelled():
+                    raise Cancelled("The update was cancelled. Nothing was replaced.") from None
                 if network:
                     raise _explain(exc, what) from exc
                 raise UpdateError(f"The {what} cannot be read: {exc}. Nothing was replaced.") from exc
             if not block:
                 break
             received += len(block)
+            window_bytes += len(block)
+            if network and time.monotonic() - window_start >= SLOW_WINDOW:
+                if window_bytes < SLOW_BYTES:
+                    raise UpdateError("The download is too slow to finish (under 1 KB/s for a minute). "
+                                      "Nothing was replaced; try again later.")
+                window_start, window_bytes = time.monotonic(), 0
             if received > size:
                 raise UpdateError("The download is larger than the release states. Nothing was replaced.")
             digest.update(block)
@@ -503,24 +551,42 @@ def _same_staged(staged, identity, mode=None):
             os.close(fd)
 
 
-def read_previous(paths):
-    """The kept copy of the version replaced by the last update, if it is intact."""
-    record = directory(paths) / "previous.json"
+def _kept_records(paths):
+    folder = directory(paths) / "previous"
+    records = []
     try:
-        if record.is_symlink() or record.stat().st_size > 4096:
-            return {}
-        value = json.loads(record.read_text())
-        copy = Path(value["path"])
-        valid = (parse_version(value["version"]) is not None and copy.parent == directory(paths) / "previous"
-                 and not copy.is_symlink() and copy.is_file() and copy.stat().st_size == value["size"]
-                 and re.fullmatch(r"[0-9a-f]{64}", value["sha256"]))
-    except (OSError, ValueError, KeyError, TypeError):
-        return {}
-    return {key: value[key] for key in ("version", "path", "size", "sha256", "saved")} if valid else {}
+        candidates = [] if folder.is_symlink() else sorted(folder.glob("LinuxTheming-*.json"))
+    except OSError:
+        return records
+    for record in candidates:
+        try:
+            if record.is_symlink() or record.stat().st_size > 4096:
+                continue
+            value = json.loads(record.read_text())
+            copy = Path(value["path"])
+            if (parse_version(value["version"]) is not None and copy.parent == folder
+                    and copy.with_suffix(".json") == record and not copy.is_symlink() and copy.is_file()
+                    and copy.stat().st_size == value["size"] and re.fullmatch(r"[0-9a-f]{64}", value["sha256"])):
+                records.append({key: value[key] for key in ("version", "path", "size", "sha256", "saved")})
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    return sorted(records, key=lambda item: str(item["saved"]), reverse=True)
+
+
+def read_previous(paths, current=__version__):
+    """The most recently kept copy of a version other than the one installed, if intact.
+
+    Copies are removed only after a replacement is committed. After an interruption
+    two may exist; the one that differs from the installed version is the way back.
+    """
+    return next((record for record in _kept_records(paths) if record["version"] != current), {})
 
 
 def _keep_previous(paths, target, *, cancelled, progress):
-    """Copy the AppImage about to be replaced into private state, verified by running it."""
+    """Copy the AppImage about to be replaced into private state, verified by running it.
+
+    Existing kept copies stay until _commit_previous(), after the replacement.
+    """
     folder = _private_directory(paths, directory(paths) / "previous")
     _require_space(folder, target["size"])
     incoming = folder / f".incoming-{secrets.token_hex(6)}"
@@ -534,7 +600,7 @@ def _keep_previous(paths, target, *, cancelled, progress):
                                               phase="keep", what="current AppImage", network=False)
         _same_staged(incoming, identity, 0o700)
         version = program_version(incoming, extract_and_run=target.get("extract_and_run", False),
-                                  scratch=directory(paths), what="current AppImage")
+                                  scratch=directory(paths), what="current AppImage", cancelled=cancelled)
         if parse_version(version) is None:
             raise UpdateError(f"The current AppImage reports an unexpected version {version!r}. "
                               "Nothing was replaced.")
@@ -544,12 +610,48 @@ def _keep_previous(paths, target, *, cancelled, progress):
     finally:
         incoming.unlink(missing_ok=True)
     record = {"version": version, "path": str(kept), "size": info.st_size, "sha256": checksum,
-              "saved": datetime.now(timezone.utc).isoformat(timespec="seconds"), "source": target["path"]}
-    changes.write_journal(directory(paths) / "previous.json", record)
-    for other in folder.iterdir():
-        if other != kept and not other.is_symlink() and other.is_file():
-            other.unlink()
+              "saved": datetime.now(timezone.utc).isoformat(timespec="microseconds"), "source": target["path"]}
+    changes.write_journal(kept.with_suffix(".json"), record)
     return record
+
+
+def _forget_kept(record):
+    copy = Path(record["path"])
+    copy.with_suffix(".json").unlink(missing_ok=True)
+    copy.unlink(missing_ok=True)
+
+
+def _commit_previous(paths, record):
+    """After the replacement: keep only the copy of the version just replaced."""
+    folder = directory(paths) / "previous"
+    keep = {Path(record["path"]).name, Path(record["path"]).with_suffix(".json").name}
+    for other in folder.iterdir():
+        if other.name not in keep and not other.is_symlink() and other.is_file():
+            other.unlink(missing_ok=True)
+    (directory(paths) / "previous.json").unlink(missing_ok=True)  # Format before 0.9.0's release.
+    changes.sync_directory(folder)
+
+
+def _remove_scratch(paths):
+    """Probe directories left by an interrupted update (an unpacked payload can be large)."""
+    for leftover in directory(paths).glob("probe-*"):
+        if leftover.is_dir() and not leftover.is_symlink():
+            shutil.rmtree(leftover, ignore_errors=True)
+    for leftover in (directory(paths) / "previous").glob(".incoming-*"):
+        with contextlib.suppress(OSError):
+            leftover.unlink()
+
+
+def _commit(paths, target, staged, identity, previous, cancelled):
+    """Replace the AppImage, then drop older kept copies. On failure, the new copy goes."""
+    try:
+        if cancelled():  # The last point at which cancelling is honoured.
+            raise Cancelled("The update was cancelled. Nothing was replaced.")
+        _replace(target, staged, identity)
+    except BaseException:
+        _forget_kept(previous)
+        raise
+    _commit_previous(paths, previous)
 
 
 def _replace(target, staged, identity):
@@ -570,6 +672,7 @@ def install(paths, release, target, *, progress=lambda *_: None, cancelled=lambd
     with _locked(paths):
         _unchanged(target)
         _remove_leftovers(target)
+        _remove_scratch(paths)
         _require_space(Path(target["path"]).parent, asset["size"])
         src = source(environ)
         transport = transport or opener(src, environ)
@@ -588,31 +691,33 @@ def install(paths, release, target, *, progress=lambda *_: None, cancelled=lambd
             if checksum != asset["sha256"]:
                 raise UpdateError("The download does not match the release checksum. Nothing was replaced.")
             progress("verify", 0, 0)
-            _verify_program(staged, release["version"], identity,
+            _verify_program(staged, release["version"], identity, cancelled=cancelled,
                             extract_and_run=target.get("extract_and_run", False), scratch=directory(paths))
             if cancelled():
                 raise Cancelled("The update was cancelled. Nothing was replaced.")
             progress("keep", 0, target["size"])
             previous = _keep_previous(paths, target, cancelled=cancelled, progress=progress)
-            if cancelled():  # The last point at which cancelling is honoured.
-                raise Cancelled("The update was cancelled. Nothing was replaced.")
             progress("install", 0, 0)
-            _replace(target, staged, identity)
+            _commit(paths, target, staged, identity, previous, cancelled)
         finally:
             staged.unlink(missing_ok=True)
     return {"version": release["version"], "path": target["path"], "previous": previous}
 
 
-def restore(paths, target, *, progress=lambda *_: None, cancelled=lambda: False):
-    """Put the kept copy back. The version it replaces is kept in turn."""
+def restore(paths, target, *, current=__version__, progress=lambda *_: None, cancelled=lambda: False):
+    """Put the kept copy back. The version it replaces is kept in turn.
+
+    ``current`` is the version installed at the target path now.
+    """
     if target.get("problem") or not target.get("path"):
         raise UpdateError(target.get("problem") or "This copy cannot be replaced.")
     with _locked(paths):
-        saved = read_previous(paths)
+        saved = read_previous(paths, current)
         if not saved:
-            raise UpdateError("No intact copy of a previous version is kept.")
+            raise UpdateError("No intact copy of another version is kept.")
         _unchanged(target)
         _remove_leftovers(target)
+        _remove_scratch(paths)
         _require_space(Path(target["path"]).parent, saved["size"])
         staged = _staging(target)
         try:
@@ -624,25 +729,26 @@ def restore(paths, target, *, progress=lambda *_: None, cancelled=lambda: False)
                 raise UpdateError("The kept copy changed since it was saved. Nothing was replaced.")
             progress("verify", 0, 0)
             _verify_program(staged, saved["version"], identity, extract_and_run=target.get("extract_and_run", False),
-                            scratch=directory(paths), what="kept copy")
+                            scratch=directory(paths), what="kept copy", cancelled=cancelled)
             if cancelled():
                 raise Cancelled("Switching versions was cancelled. Nothing was replaced.")
             progress("keep", 0, target["size"])
             previous = _keep_previous(paths, target, cancelled=cancelled, progress=progress)
-            if cancelled():
-                raise Cancelled("Switching versions was cancelled. Nothing was replaced.")
             progress("install", 0, 0)
-            _replace(target, staged, identity)
+            _commit(paths, target, staged, identity, previous, cancelled)
         finally:
             staged.unlink(missing_ok=True)
     return {"version": saved["version"], "path": target["path"], "previous": previous}
 
 
 def discard_previous(paths):
+    """Delete every kept copy."""
     with _locked(paths):
-        saved = read_previous(paths)
-        if saved:
-            Path(saved["path"]).unlink(missing_ok=True)
+        folder = directory(paths) / "previous"
+        if folder.is_dir() and not folder.is_symlink():
+            for other in folder.iterdir():
+                if not other.is_symlink() and other.is_file():
+                    other.unlink(missing_ok=True)
         (directory(paths) / "previous.json").unlink(missing_ok=True)
 
 

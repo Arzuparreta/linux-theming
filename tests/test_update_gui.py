@@ -278,6 +278,121 @@ class UpdateDialogTests(unittest.TestCase):
         self.open()
         self.assertTrue(self.visible("updateMirror"))
 
+    def available(self):
+        self.open()
+        with patch("linux_theming.updates.check", return_value=RELEASE):
+            self.click("checkUpdates")
+        self.assertTrue(self.visible("updateAvailable"))
+
+    def test_conflict_withdraws_the_offer_and_requires_a_new_check(self):
+        self.available()
+
+        def changed(*_args, **_options):
+            self.target = dict(self.target, fingerprint="9:9:9")  # Replaced by hand meanwhile.
+            raise updates.UpdateError("The AppImage was moved, replaced or changed after this window opened.")
+        with patch("linux_theming.updates.install", side_effect=changed):
+            self.click("installUpdate")
+        self.assertEqual(self.update["status"], "error")
+        self.assertIn("Check again", self.update["error"])
+        self.assertTrue(self.visible("checkUpdates"))
+        self.assertFalse(self.visible("retryUpdate"))
+        with patch("linux_theming.updates.install") as install:
+            self.controller.retryUpdate()  # Checks again instead of installing.
+            self.settle()
+        install.assert_not_called()
+
+    def test_cancel_shows_progress_until_the_step_stops(self):
+        self.available()
+        stop = threading.Event()
+
+        def install(paths, release, target, *, progress, cancelled):
+            progress("download", 1, 78_000_000)
+            while not cancelled():
+                time.sleep(0.01)
+            stop.wait(5)
+            raise updates.Cancelled("The update was cancelled. Nothing was replaced.")
+        with patch("linux_theming.updates.install", side_effect=install):
+            QMetaObject.invokeMethod(self.window.findChild(QObject, "installUpdate"), "clicked")
+            QTest.qWait(50)
+            QMetaObject.invokeMethod(self.window.findChild(QObject, "cancelUpdate"), "clicked")
+            QTest.qWait(50)
+            self.assertTrue(self.update["cancelling"])
+            cancel = self.window.findChild(QObject, "cancelUpdate")
+            self.assertEqual(cancel.property("text"), "Cancelling…")
+            self.assertFalse(cancel.property("enabled"))
+            stop.set()
+            self.settle()
+        self.assertEqual(self.update["status"], "available")
+        self.assertFalse(self.update["cancelling"])
+
+    def test_opening_during_an_automatic_check_shows_the_destination(self):
+        updates.save_preferences(self.paths, automatic=True)
+        answer = threading.Event()
+
+        def slow_check():
+            answer.wait(5)
+            return RELEASE
+        with patch("linux_theming.updates.check", side_effect=slow_check):
+            self.controller.automaticUpdateCheck()
+            self.open()  # While the request is still running.
+            self.assertEqual(self.update["path"], str(self.installed))
+            answer.set()
+            self.settle()
+        self.assertTrue(self.visible("updateAvailable"))
+        self.assertTrue(self.enabled("installUpdate"))
+
+    def test_actions_stay_inside_the_smallest_window(self):
+        self.window.setProperty("width", 760)
+        self.window.setProperty("height", 600)
+        self.target = {"path": str(self.installed) + "/a/very/long/path" * 6, "problem": "x " * 200}
+        kept = {"version": "8.0.0", "path": "/k", "size": 78_000_000, "sha256": "b" * 64, "saved": ""}
+        with patch("linux_theming.updates.read_previous", return_value=kept):
+            self.available()
+        self.controller.publish_update(error="e " * 300, mirror="https://mirror.example")
+        self.settle()
+        content = self.window.property("contentItem")
+        for name in ("closeUpdates", "installUpdate"):
+            button = self.window.findChild(QObject, name)
+            bottom = button.mapToItem(content, 0, button.property("height")).y()
+            self.assertLessEqual(bottom, 600, name)
+
+    def test_switch_back_before_restarting(self):
+        running = updates.__version__
+        kept = {"version": running, "path": "/k", "size": 78_000_000, "sha256": "b" * 64, "saved": ""}
+        with patch("linux_theming.updates.read_previous",
+                   side_effect=lambda paths, current: kept if current != running else {}):
+            self.available()
+            self.assertFalse(self.visible("keptVersion"))  # The running version is not offered.
+            with patch("linux_theming.updates.install",
+                       return_value={"version": "9.0.0", "path": "", "previous": {}}):
+                self.click("installUpdate")
+            self.assertTrue(self.visible("keptVersion"))
+            self.assertTrue(self.visible("switchToKept"))
+            with patch("linux_theming.updates.restore", side_effect=updates.UpdateError("disk full")):
+                self.click("switchToKept")
+                self.click("confirmSwitchButton")
+            self.assertEqual(self.update["status"], "installed")  # Nothing changed; restart still pending.
+            self.assertEqual(self.update["notice"], "disk full")
+            with patch("linux_theming.updates.restore",
+                       return_value={"version": running, "path": "", "previous": {}}) as restore:
+                self.click("switchToKept")
+                self.click("confirmSwitchButton")
+            self.assertEqual(restore.call_args.kwargs["current"], "9.0.0")
+        self.assertEqual(self.update["status"], "idle")
+        self.assertIn("No restart is needed", self.update["notice"])
+        self.assertFalse(self.visible("updateIndicator"))
+
+    def test_restart_waits_for_theme_work(self):
+        self.available()
+        with patch("linux_theming.updates.install", return_value={"version": "9.0.0", "path": "", "previous": {}}):
+            self.click("installUpdate")
+        self.controller.publish(busy=True)
+        self.app.processEvents()
+        self.assertFalse(self.enabled("restartUpdate"))
+        self.controller.publish(busy=False)
+        self.app.processEvents()
+        self.assertTrue(self.enabled("restartUpdate"))
+
     def test_automatic_check_is_opt_in_daily_and_quiet(self):
         with patch("linux_theming.updates.check") as check:
             self.controller.automaticUpdateCheck()

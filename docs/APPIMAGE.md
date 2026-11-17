@@ -200,17 +200,25 @@ SHA-256 first. The engine (`linux_theming/updates.py`) then:
    The verified file's identity is checked again before it runs and before the
    rename, so different bytes put at its name are refused.
 4. Copies the AppImage being replaced to
-   `$XDG_STATE_HOME/linux-theming/updates/previous/` (private, one version kept),
-   verified the same way, with a checksum record in `previous.json`.
+   `$XDG_STATE_HOME/linux-theming/updates/previous/` (private), verified the same
+   way, with a checksum record beside it. Older kept copies are deleted only after
+   the replacement is committed; after an interruption both remain, and the one
+   that differs from the installed version is offered.
 5. Replaces the AppImage by rename in the same folder. A file changed, moved or
    replaced since the check is never overwritten; reopening the dialog after such
-   a change withdraws the offer. Cancelling is honoured until the rename starts.
+   a change, or a refused install, withdraws the offer until the next check.
+
+**Cancel** is honoured until the rename starts. It takes effect when the current
+network read returns (at most 30 seconds) or within half a second while a program
+is being verified; a verification probe is stopped with every process it started.
+A download slower than about 1 KB/s for a whole minute stops with an explanation.
 
 Running windows keep their original file until they restart. **Restart now** waits
 until this process has exited, so the single-instance endpoint and the AppImage
 mount are released, then starts the new file with the same view. **Switch to
 X.Y.Z…** restores the kept copy through the same verification, keeping the
-replaced version in turn. **Delete copy** removes it. A failed, cancelled or
+replaced version in turn; it is also available before restarting, to undo an
+update that has not been used yet. **Delete copy** removes it. A failed, cancelled or
 interrupted update leaves the AppImage untouched; leftover downloads are removed
 by the next update. Theme profiles, history and menu entries are not changed:
 the menu entry keeps working because the path stays the same.

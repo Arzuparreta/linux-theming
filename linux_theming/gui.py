@@ -109,6 +109,7 @@ class Controller(QObject):
         self._update_target = {}
         self._offer_target = {}  # The AppImage as it was when the offered release was checked.
         self._update_retry = ""
+        self._restore_from = ""  # Update status when a switch to the kept copy started.
         # The file this window was started from. If it changes later, the version on
         # disk is unknown here and no update or switch is offered until a restart.
         self._startup_target = updates.installation()
@@ -342,13 +343,18 @@ class Controller(QObject):
                 "path": "", "problem": "", "sourceProblem": problem, "mirror": mirror, "phase": "", "done": 0, "total": 0,
                 "error": "", "notice": "", "automatic": preference["automatic"],
                 "lastCheck": preference["last_check"], "previous": {}, "installed": "", "restored": False,
-                "operation": "", "retry": "check", "keptIn": str(updates.directory(self.paths) / "previous")}
+                "operation": "", "cancelling": False, "retry": "check", "keptIn": str(updates.directory(self.paths) / "previous")}
 
     def publish_update(self, **values):
         self.publish(update=dict(self._state["update"], retry=self._update_retry or "check", **values))
 
+    def disk_version(self):
+        """The version in the AppImage file: the running one unless an install awaits a restart."""
+        state = self._state["update"]
+        return state["installed"] if state["status"] == "installed" else updates.__version__
+
     def previous_update(self):
-        saved = updates.read_previous(self.paths)
+        saved = updates.read_previous(self.paths, self.disk_version())
         return dict(saved, sizeText=updates.megabytes(saved["size"])) if saved else {}
 
     def run_update(self, operation, complete):
@@ -380,10 +386,15 @@ class Controller(QObject):
     @Slot()
     def openUpdates(self):
         """Read where an update would go. Local and instant; nothing is contacted."""
-        if self._update_work is not None:
-            return
-        self._update_target = target = self.current_target()
+        target = self.current_target()
         preference = updates.preferences(self.paths)
+        if self._update_work is not None:
+            # A check or install is running: show where it goes, change nothing.
+            shown = self._offer_target if self._state["update"]["status"] == "working" else target
+            self.publish_update(path=shown.get("path", ""), problem=shown.get("problem", ""),
+                                automatic=preference["automatic"], lastCheck=preference["last_check"])
+            return
+        self._update_target = target
         stale = {}
         if self._update_release is not None and (target["problem"]
                                                  or target.get("fingerprint") != self._offer_target.get("fingerprint")):
@@ -448,17 +459,35 @@ class Controller(QObject):
     def finish_update(self, restored):
         def complete(result, error):
             # After a successful install the file differs from the one started, by design.
-            self._update_target = self.current_target() if error else updates.installation()
-            common = {"phase": "", "previous": self.previous_update(), "path": self._update_target["path"],
-                      "problem": self._update_target["problem"]}
-            if isinstance(result, updates.Cancelled):
+            self._update_target = target = self.current_target() if error else updates.installation()
+            common = {"phase": "", "cancelling": False, "path": target["path"], "problem": target["problem"]}
+            offered = self._offer_target.get("fingerprint")
+            if error and offered and target.get("fingerprint") != offered:
+                # The AppImage changed since the check: that review no longer applies.
+                self._update_release, self._offer_target, self._update_retry = None, {}, "check"
+                self.publish_update(status="error", error=error + " Check again to review the current file.",
+                                    notice="", **common)
+            elif error and restored and self._restore_from == "installed":
+                # Nothing was replaced: the installed update still awaits a restart.
+                self.publish_update(status="installed", error="", notice=error, **common)
+            elif isinstance(result, updates.Cancelled):
                 # A cancelled download leaves the checked release ready to install again.
-                self.publish_update(status="idle" if restored else "available", error="", notice=error, **common)
+                status = "available" if self._update_release is not None and not restored else "idle"
+                self.publish_update(status=status, error="", notice=error, **common)
             elif error:
                 self.publish_update(status="error", error=error, notice="", **common)
+            elif result["version"] == updates.__version__:
+                # Switched back to the version this window runs: nothing awaits a restart.
+                self._update_release, self._offer_target, self._update_retry = None, {}, "check"
+                self.publish_update(status="idle", installed="", restored=False, error="",
+                                    notice=f"Version {result['version']} is back in place. No restart is needed.",
+                                    **common)
             else:
+                self._update_release, self._offer_target, self._update_retry = None, {}, "check"
                 self.publish_update(status="installed", installed=result["version"], restored=restored,
                                     error="", notice="", **common)
+            # The kept copy to offer depends on the version now in the file.
+            self.publish_update(previous=self.previous_update())
         return complete
 
     @Slot()
@@ -470,24 +499,26 @@ class Controller(QObject):
             return
         self._update_retry = "install"
         self.publish_update(status="working", operation="install", phase="download", done=0,
-                            total=release["asset"]["size"], error="", notice="")
+                            total=release["asset"]["size"], error="", notice="", cancelling=False)
         self.run_update(lambda work: updates.install(self.paths, release, target, progress=work.report,
                                                      cancelled=work.cancel.is_set),
                         self.finish_update(False))
 
     @Slot()
     def restorePrevious(self):
-        saved = updates.read_previous(self.paths)
-        if self._update_work is not None or not saved or self._state["update"]["status"] in ("installed", "working"):
+        current = self.disk_version()
+        saved = updates.read_previous(self.paths, current)
+        if self._update_work is not None or not saved or self._state["update"]["status"] == "working":
             return
         self._update_target = target = self.current_target()
         if target["problem"]:
             self.publish_update(status="error", error=target["problem"], problem=target["problem"])
             return
         self._update_retry = "restore"
+        self._restore_from = self._state["update"]["status"]
         self.publish_update(status="working", operation="restore", phase="download", done=0, total=saved["size"],
-                            error="", notice="")
-        self.run_update(lambda work: updates.restore(self.paths, target, progress=work.report,
+                            error="", notice="", cancelling=False)
+        self.run_update(lambda work: updates.restore(self.paths, target, current=current, progress=work.report,
                                                      cancelled=work.cancel.is_set),
                         self.finish_update(True))
 
@@ -502,8 +533,9 @@ class Controller(QObject):
 
     @Slot()
     def cancelUpdate(self):
-        if self._update_work is not None:
+        if self._update_work is not None and self._state["update"]["phase"] != "install":
             self._update_work.cancel.set()
+            self.publish_update(cancelling=True)
 
     @Slot()
     def discardPrevious(self):
