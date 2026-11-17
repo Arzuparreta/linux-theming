@@ -16,6 +16,7 @@ updatable, with the release page for a manual download.
 """
 
 import contextlib
+import errno
 import fcntl
 import grp
 import hashlib
@@ -26,6 +27,7 @@ import platform
 import pwd
 import re
 import secrets
+import select
 import shutil
 import signal
 import socket
@@ -249,6 +251,8 @@ class _Watch:
         _watching.current = self._previous
         self._done.set()
         self._thread.join()
+        for handle in self.sockets:
+            handle.close()
 
     @staticmethod
     def _stop(sock):
@@ -258,12 +262,18 @@ class _Watch:
             socket.socket.shutdown(sock, socket.SHUT_RDWR)
 
     def register(self, sock):
-        """Called as soon as a TCP socket exists, before TLS: a late socket is stopped at once."""
+        """Called as soon as a TCP socket exists: a late socket is stopped at once.
+
+        Keeps a duplicate descriptor. TLS wrapping detaches the original socket
+        object, but shutdown() acts on the connection, which the duplicate still
+        refers to.
+        """
+        handle = socket.socket(fileno=os.dup(sock.fileno()))
         with self._lock:
-            self.sockets.append(sock)
+            self.sockets.append(handle)
             late = bool(self.reason)
         if late:
-            self._stop(sock)
+            self._stop(handle)
         return sock
 
     def _run(self):
@@ -292,19 +302,48 @@ class _Watch:
         return None
 
 
+def _connect(watch, address, timeout=None, source_address=None):
+    """socket.create_connection, registered before connecting and stoppable while it connects."""
+    timeout = timeout if isinstance(timeout, (int, float)) else TIMEOUT
+    host, port = address
+    error = None
+    for family, kind, proto, _name, target in socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM):
+        if watch.reason:
+            break
+        sock = socket.socket(family, kind, proto)
+        try:
+            watch.register(sock)
+            if source_address:
+                sock.bind(source_address)
+            sock.setblocking(False)
+            code = sock.connect_ex(target)
+            deadline = time.monotonic() + timeout
+            while code in (errno.EINPROGRESS, errno.EALREADY, errno.EWOULDBLOCK):
+                if watch.reason:
+                    raise OSError("The request was stopped while connecting.")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("timed out")
+                if select.select([], [sock], [], min(0.1, remaining))[1]:
+                    code = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+            if code:
+                raise OSError(code, os.strerror(code))
+            sock.settimeout(timeout)
+            return sock
+        except OSError as exc:
+            error = exc
+            sock.close()
+    raise error or OSError("The request was stopped before connecting.")
+
+
 def _watched(connection):
     class Watched(connection):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             watch = getattr(_watching, "current", None)
             if watch is not None:
-                create = self._create_connection
-
-                def watched_connection(*address, **options):
-                    if watch.reason:  # Stopped before connecting: do not start.
-                        raise OSError("The request was stopped before connecting.")
-                    return watch.register(create(*address, **options))
-                self._create_connection = watched_connection
+                self._create_connection = lambda address, timeout=None, source_address=None: _connect(
+                    watch, address, timeout, source_address)
     return Watched
 
 
@@ -726,6 +765,8 @@ def _copy_hashed(stream, staged, size, *, progress, cancelled, phase, what="AppI
                     raise _explain(exc, what) from exc
                 raise UpdateError(f"The {what} cannot be read: {exc}. Nothing was replaced.") from exc
             if not block:
+                if cancelled():  # A cancel that shut the connection down ends the read with EOF.
+                    raise Cancelled("The update was cancelled. Nothing was replaced.")
                 break
             received += len(block)
             window_bytes += len(block)

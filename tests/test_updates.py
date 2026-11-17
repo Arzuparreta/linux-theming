@@ -1,10 +1,12 @@
 """AppImage update engine against a private loopback release, in disposable HOME/XDG."""
 
 import contextlib
+import errno
 import hashlib
 import http.server
 import json
 import os
+import shutil
 import socket
 import ssl
 import stat
@@ -279,22 +281,84 @@ class UpdateTests(unittest.TestCase):
 
     def test_cancelling_while_still_connecting_stops_the_later_socket(self):
         self.server.crawl_headers = True
-        real = socket.create_connection
+        real = socket.getaddrinfo
 
         def slow_resolution(*args, **options):
             time.sleep(0.4)  # Cancelled meanwhile; the socket appears only afterwards.
             return real(*args, **options)
         started = time.monotonic()
-        with (patch("socket.create_connection", side_effect=slow_resolution),
+        with (patch("socket.getaddrinfo", side_effect=slow_resolution),
               self.assertRaises(updates.Cancelled)):
             updates.check(current="8.0.0", machine="x86_64", environ=self.environ,
                           cancelled=lambda: time.monotonic() - started > 0.15)
         self.assertLess(time.monotonic() - started, 3)
         started = time.monotonic()
         with (patch.object(updates, "METADATA_DEADLINE", 0.2),
-              patch("socket.create_connection", side_effect=slow_resolution),
+              patch("socket.getaddrinfo", side_effect=slow_resolution),
               self.assertRaisesRegex(updates.UpdateError, "in time")):
             self.check()
+        self.assertLess(time.monotonic() - started, 3)
+
+    def test_cancelling_while_tcp_connects(self):
+        started = time.monotonic()
+        with (patch.object(socket.socket, "connect_ex", return_value=errno.EINPROGRESS),
+              patch("linux_theming.updates.select.select", side_effect=lambda r, w, x, t: time.sleep(t) or ([], [], [])),
+              self.assertRaises(updates.Cancelled)):
+            updates.check(current="8.0.0", machine="x86_64", environ=self.environ,
+                          cancelled=lambda: time.monotonic() - started > 0.2)
+        self.assertLess(time.monotonic() - started, 3)
+
+    def https(self, behaviour):
+        """A verified local HTTPS endpoint that stalls the handshake or trickles headers."""
+        if shutil.which("openssl") is None:
+            self.skipTest("openssl is needed to create a test certificate")
+        cert, key = self.root / "cert.pem", self.root / "key.pem"
+        if not cert.exists():
+            subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+                            "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1",
+                            "-keyout", str(key), "-out", str(cert)], check=True, capture_output=True)
+        listener = socket.create_server(("127.0.0.1", 0))
+        self.addCleanup(listener.close)
+        stop = threading.Event()
+        self.addCleanup(stop.set)
+        server_tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_tls.load_cert_chain(cert, key)
+
+        def serve():
+            with contextlib.suppress(OSError):
+                connection, _ = listener.accept()
+                with connection:
+                    if behaviour == "handshake":
+                        stop.wait(30)  # Accepts TCP, never answers the TLS handshake.
+                        return
+                    with server_tls.wrap_socket(connection, server_side=True) as tls:
+                        for byte in b"HTTP/1.0 200 OK\r\nX-Slow: " + b"x" * 600:
+                            if stop.is_set():
+                                return
+                            tls.sendall(bytes([byte]))
+                            time.sleep(0.05)
+        threading.Thread(target=serve, daemon=True).start()
+        client_tls = ssl.create_default_context(cafile=str(cert))
+        self.addCleanup(patch.stopall)
+        patch("linux_theming.updates.tls_context", return_value=client_tls).start()
+        return {updates.SOURCE_VARIABLE: f"https://127.0.0.1:{listener.getsockname()[1]}"}
+
+    def test_https_handshake_and_trickled_headers_are_cancellable(self):
+        for behaviour in ("handshake", "headers"):
+            with self.subTest(behaviour=behaviour):
+                environ = self.https(behaviour)
+                started = time.monotonic()
+                with self.assertRaises(updates.Cancelled):
+                    updates.check(current="8.0.0", machine="x86_64", environ=environ,
+                                  cancelled=lambda started=started: time.monotonic() - started > 0.3)
+                self.assertLess(time.monotonic() - started, 3)
+
+    def test_https_trickled_headers_meet_the_deadline(self):
+        environ = self.https("headers")
+        started = time.monotonic()
+        with (patch.object(updates, "METADATA_DEADLINE", 0.4),
+              self.assertRaisesRegex(updates.UpdateError, "in time")):
+            updates.check(current="8.0.0", machine="x86_64", environ=environ)
         self.assertLess(time.monotonic() - started, 3)
 
     def test_cancel_and_commit_exclude_each_other(self):
