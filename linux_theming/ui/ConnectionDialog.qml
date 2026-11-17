@@ -85,7 +85,9 @@ Sheet {
                     visible: !!dialog.info.blocked
                     tone: "danger"
                     title: dialog.info.explanation || "This configuration cannot be changed safely yet."
-                    body: dialog.info.canExport === false ? "Your current preferences are kept. Resolve the issue in your desktop settings, then try again."
+                    body: dialog.info.reportable ? "Your configuration is valid. This is a current limitation of Linux Theming, not a problem with your files. "
+                            + "Your current files are kept. Please report it so it can be fixed."
+                        : dialog.info.canExport === false ? "Your current preferences are kept. Resolve the issue in your desktop settings, then try again."
                         : "Your current files are kept. You can export a theme file and include it in your own configuration instead."
                 }
                 RowLayout {
@@ -151,6 +153,14 @@ Sheet {
         RowLayout {
             Layout.fillWidth: true
             spacing: 8
+            Command {
+                objectName: "connectionReport"
+                visible: !!dialog.info.reportable
+                compact: true
+                iconName: "link"
+                text: "Report this limitation…"
+                onClicked: Qt.openUrlExternally(dialog.info.reportUrl)
+            }
             Command {
                 objectName: "connectionExport"
                 visible: dialog.info.canExport !== false

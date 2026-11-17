@@ -15,7 +15,7 @@ reopen it yourself.
 
 | Integration | Managed changes | Conditions and activation |
 |---|---|---|
-| Konsole | Generated `LinuxTheming.colorscheme` and the existing default user profile's `Appearance/ColorScheme` | Default profile must already exist under `$XDG_DATA_HOME/konsole` (default `~/.local/share/konsole`) and be selected in `konsolerc`. Fonts, commands and other profiles are kept. System/built-in profiles need a user profile first. Reopen Konsole |
+| Konsole | Generated `LinuxTheming.colorscheme` and the existing default user profile's `Appearance/ColorScheme` | Default profile must already exist under `$XDG_DATA_HOME/konsole` (default `~/.local/share/konsole`) and be selected in `konsolerc`. Fonts, commands and other profiles are kept. System/built-in profiles need a user profile first. `konsolerc` and the profile are read with KDE's own file rules. Reopen Konsole |
 | GNOME Terminal | Native background, foreground, sixteen ANSI colors, cursor and selection in the existing default profile | Requires GSettings, the GNOME Terminal schemas, a session bus and writable keys; works outside GNOME. No profile is created. Default-profile changes block update/undo until restored. Existing terminals may update immediately |
 | VS Code | User `workbench.colorCustomizations` for interface and integrated terminal colors | Conventional `Code/User/settings.json` only, including JSONC comments/trailing commas. Keep syntax theme, extensions, fonts, other custom colors and theme-scoped overrides. Workspace/named-profile/remote settings may override user colors. No extension installation |
 | btop | Generated `btop/themes/linux-theming.theme` and `color_theme` selection | Keep layout, update interval, meters and all other preferences. Terminal transparency/theme-background settings remain effective. Reopen btop or select the theme in its menu |
@@ -27,7 +27,7 @@ reopen it yourself.
 | i3 / Sway | `client.*` window border/title color roles | i3: reviewed IPC `reload` after saving and undo, only for the active conventional config with no other pending edits; no `restart`. Sway: manual reload. Includes and complex syntax require manual resolution/export |
 | Hyprland | `general` active/inactive border colors | Keep other general settings. Literal root config only; source includes require manual resolution. Hyprland may watch its config |
 | GNOME | Native `color-scheme` and nearest available native accent, when exposed | Active GNOME session, readable enum ranges and writable keys required. Accent is a native named color (GNOME 47+), not arbitrary RGB. Older versions change mode only. No Shell extension/theme installation. Select GTK separately for application CSS |
-| KDE Plasma | Application color roles in `kdeglobals`, including window title roles | Keep icons, fonts, widget style, decoration and Plasma Shell theme. Reopen applications. Does not install/activate a Shell theme or reload KWin |
+| KDE Plasma | Every color set KDE's own schemes define in `kdeglobals` (`[Colors:*]`, including `[Colors:Header][Inactive]`) and the `[WM]` window title roles | Keep icons, fonts, widget style, decoration, color effects and Plasma Shell theme. Read with KDE's own file rules; see [KDE configuration files](#kde-configuration-files). Reopen applications. Does not install/activate a Shell theme or reload KWin |
 | Xfce | Existing GTK theme's installed light/dark counterpart through `/Net/ThemeName` | Active Xfce and already running `xfconfd` required. Missing counterparts block the change. Adwaita variants are built into GTK 3. No icon, font, panel or window-manager changes. Select GTK separately for palette CSS |
 | Polybar | Each existing bar's background/foreground and conventional `[colors]` variables | Native watching uses the existing `polybar --reload` launch flag. No config option can enable that flag in a running bar; launch scripts are kept. Needs an existing `[bar/name]`; custom module literals stay as configured |
 | Waybar | Palette defaults in `style.css` and `reload_style_on_change: true` in the existing `config` or `config.jsonc` | Reopen once to start native CSS watching. Preserve comments, modules/layout and unrelated JSONC settings. Multi-bar arrays need distinct name/output/position values and stable order for safe restoration. Includes and ambiguous config names are blocked; no missing layout is invented. Higher-specificity CSS can override colors |
@@ -45,9 +45,52 @@ reopen it yourself.
 
 No inventory row is solely discovery-only in this release. Unsupported custom
 configuration syntax, missing dependencies or incompatible running sessions are
-still reported and blocked; capability does not imply current availability.
+still reported and blocked; capability does not imply current availability. See
+[when a configuration is refused](#when-a-configuration-is-refused).
 Other unlisted desktop components remain unsupported. Discovery of GTK libraries
 is unknown rather than an installation claim; its user CSS can still be selected.
+
+## When a configuration is refused
+
+The rule: **if the program that owns a file can write it, Linux Theming must be
+able to read it.** A file is only refused for a reason the user can see in
+their own configuration, and the refusal names the file and line
+(`~/.config/kdeglobals:12: ...`). Refusals are one of two kinds:
+
+- **Your setup.** Something set on purpose or that the program itself does not
+  accept: a locked setting, an include or generated file, a configuration folder
+  linked into a dotfiles repository, or a line the program ignores. The message
+  says what to change; a theme file can be exported instead.
+- **A current limitation of Linux Theming.** The file is valid for its program,
+  but Linux Theming cannot edit it yet. The dialog says the configuration is
+  valid and offers **Report this limitation…**, which opens a prefilled GitHub
+  issue in the browser with the message and the file path shortened to `~`.
+  Nothing is sent until the issue is submitted there.
+
+KDE files (`kdeglobals`, `konsolerc`, Konsole profiles) follow this fully. The
+other INI-style integrations (qt5ct/qt6ct, Polybar, Dunst, Mako, foot, btop)
+still use the generic reader: their refusals name the line, but do not yet
+separate the two kinds. They will move to their programs' own rules one by one.
+
+### KDE configuration files
+
+They are read the way KDE Frameworks' KConfig reads them
+(`KConfigIniBackend::parseConfig`):
+
+| | KDE syntax | Linux Theming |
+|---|---|---|
+| Read and kept | Keys with spaces (`Show hidden files=false`), nested groups (`[Colors:Header][Inactive]`), language versions (`Name[de]=`), `[$e]` (expand) and `[$d]` (deleted) entries, settings before the first group, `#` comments | Edited key by key; everything else stays byte for byte |
+| Your setup | A color setting Linux Theming would change is locked with `[$i]`, on the key, its group or the whole file | Refused: locked settings are never changed. Locked settings elsewhere do not block |
+| Your setup | Lines KDE ignores too: no `=`, an unclosed `[`, two language suffixes | Refused with the line; correct or remove it |
+| Current limitation | A group or key that appears twice (KDE combines groups and uses the last key) | Refused and reportable |
+
+KDE programs rewrite the whole file when they save: groups and keys are sorted
+and comments are dropped. That is not a conflict; only an edit to a color
+Linux Theming set is.
+
+The existing color settings shown before connecting Plasma are exactly the
+settings that will be replaced. KDE's color effects, the color scheme name and
+everything else in `kdeglobals` are not touched.
 
 ## Automatic color updates
 
@@ -112,9 +155,10 @@ order whenever their window closes. **Ownership covers the content we manage,
 not the whole file.** Updates, disconnection and undo apply their change to the
 file as it is now with a deterministic three-way merge:
 
-- INI-style files (qt5ct/qt6ct, kdeglobals, Polybar, Dunst, Mako, foot) merge key
+- INI-style files (qt5ct/qt6ct, kdeglobals, Konsole, Polybar, Dunst, Mako, foot) merge key
   by key. Qt values are compared as QSettings reads them, so `"/path"` and
-  `/path` are the same value. Reordered keys and new keys or sections are kept.
+  `/path` are the same value. KDE files use KConfig's grammar, so a KDE program
+  rewriting the whole file is merged too. Reordered keys and new keys or sections are kept.
 - VS Code and T3 Code settings merge by JSON member, including individual VS
   Code color entries. Application saves that reorder/reformat the document and
   later unrelated settings are kept. VS Code comments/trailing commas survive
@@ -147,7 +191,8 @@ only the recorded before/after values. Native settings APIs do not provide atomi
 compare-and-set, so another settings writer can still race the final check.
 
 The INI editor preserves unrelated entries/comments and rejects duplicate keys or
-sections and unsupported syntax. GTK/Wofi/Waybar stylesheet adapters append
+sections and unsupported syntax, naming the line (KDE files: see
+[KDE configuration files](#kde-configuration-files)). GTK/Wofi/Waybar stylesheet adapters append
 palette defaults without deleting existing layout rules; their imports,
 unbalanced braces and `!important` require manual resolution or export.
 Rofi has a separate Rasi adapter supporting the native theme/import structure. Shell startup files remain
@@ -165,6 +210,21 @@ undo and disconnection, conflicting edits to managed colors, qt5ct/qt6ct saves
 the developer's desktop. Offscreen Qt tests cover selection, unavailable/unknown
 components, approval and export. The bundled smoke test exercises all twenty-three
 file adapters, as well as the existing guided Kitty GUI workflow.
+
+KDE adapters are tested against real KDE files: the Breeze color schemes
+(`plasma/breeze`), a Plasma look-and-feel defaults file with nested groups
+(`plasma/plasma-workspace`) and Konsole's `konsolerc` and Breeze color scheme
+(`utilities/konsole`). A snapshot is committed in `tests/fixtures/kde` with the
+commit each file came from. The **KDE files** CI workflow downloads the latest
+version of each file on every push, pull request and weekly, through the KDE
+GitLab API (single files only, no clone), installs only the KConfig framework
+in an Arch Linux container, and tests both the latest files and the snapshot.
+`kreadconfig6`/`kwriteconfig6` are the reference: every value the parser reads
+must match KConfig, Plasma and Konsole files written by KConfig are themed,
+rewritten by KConfig, updated and disconnected, and every color role a current
+Breeze scheme defines must be one Linux Theming sets. The job summary shows
+which upstream files changed since the snapshot. Locally the KConfig tests skip
+when `kreadconfig6` is not installed.
 
 Already installed zsh/fish, Alacritty and i3 parsers are exercised with private
 HOME/XDG and no desktop connection. GLib tests also compile a private GNOME-shaped

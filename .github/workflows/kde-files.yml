@@ -1,0 +1,53 @@
+name: KDE files
+# Tests the KDE adapters against the latest KDE files and against KDE's own
+# KConfig reader/writer, so format changes in KDE are found before users hit
+# them. Only the individual files are downloaded (scripts/fetch-kde-files.py)
+# and only the KConfig framework is installed, not Plasma or KDE applications.
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: '17 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  latest:
+    runs-on: ubuntu-latest
+    # Arch Linux ships the current KDE Frameworks release.
+    container: archlinux:latest
+    steps:
+      - name: Install Python and KConfig (kreadconfig6, kwriteconfig6)
+        run: pacman -Syu --noconfirm --needed python python-pillow kconfig
+      - uses: actions/checkout@v4
+      - name: Download the latest KDE files
+        run: python scripts/fetch-kde-files.py --out "$RUNNER_TEMP/kde"
+      - name: Report KDE files that changed since the committed snapshot
+        run: |
+          {
+            echo '### KDE files'
+            python - "$RUNNER_TEMP/kde/SOURCES.json" <<'EOF'
+          import json, sys
+          for name, source in json.load(open(sys.argv[1]))["files"].items():
+              print(f"- `{name}`: {source['project']}@{source['commit'][:12]} `{source['path']}`")
+          EOF
+            changed=0
+            for file in tests/fixtures/kde/*; do
+              name=$(basename "$file")
+              [ "$name" = SOURCES.json ] && continue
+              if ! cmp -s "$file" "$RUNNER_TEMP/kde/$name"; then
+                changed=1
+                echo; echo "#### \`$name\` changed upstream"; echo '```diff'
+                diff -u "$file" "$RUNNER_TEMP/kde/$name" | head -200 || true
+                echo '```'
+              fi
+            done
+            [ "$changed" = 1 ] && echo && echo 'Refresh the snapshot with `scripts/fetch-kde-files.py --update` once the tests pass.'
+            true
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Test the latest KDE files with KConfig
+        run: LINUX_THEMING_KDE_FILES="$RUNNER_TEMP/kde" LINUX_THEMING_REQUIRE_KCONFIG=1 python -m unittest tests.test_kde_files -v
+      - name: Test the committed snapshot with KConfig
+        run: LINUX_THEMING_REQUIRE_KCONFIG=1 python -m unittest tests.test_kde_files -v

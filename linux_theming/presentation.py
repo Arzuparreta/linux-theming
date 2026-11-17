@@ -1,8 +1,25 @@
 """Read-only explanations for the UI; permission and file checks stay in the engine."""
 
 from pathlib import Path
+from urllib.parse import urlencode
 
-from . import appearance, changes, integrations, inventory
+from . import __version__, appearance, changes, integrations, inventory
+
+ISSUES_URL = "https://github.com/Arzuparreta/linux-theming/issues/new"
+
+
+def report_url(name, issues, home=""):
+    """A prefilled issue for a file the program accepts but this app cannot edit yet.
+
+    Only opened when the user presses the button; the browser shows the text
+    before anything is submitted. The home directory is shortened to ~.
+    """
+    text = "\n".join(issues)
+    if home:
+        text = text.replace(home.rstrip("/") + "/", "~/")
+    body = (f"Linux Theming {__version__} cannot read a {name} configuration that {name} accepts.\n\n"
+            f"```\n{text}\n```\n\nWhat wrote this line (an application, a setting, a hand edit)?\n")
+    return ISSUES_URL + "?" + urlencode({"title": f"{name}: configuration not readable yet", "body": body})
 
 
 def order_components(components):
@@ -56,7 +73,11 @@ def connection(paths, component, *, discovered=None):
         explanation = "An included file mixes colors with other preferences. This version cannot safely separate them."
     else:
         explanation = " ".join(issues) if issues else ""
+    # Only when the file itself is the problem: not for a missing program or linked folder.
+    reportable = bool(report.get("unreadable")) and item["installed"] is not False and not linked_folder
     return {"id": component, "name": item["name"], "path": path,
+            "reportable": reportable,
+            "reportUrl": report_url(item["name"], list(dict.fromkeys(issues)), str(paths.home)) if reportable else "",
             "linked": linked, "target": target,
             "existingColors": bool(report.get("has_existing_colors")) and not item["managed"],
             "issues": list(dict.fromkeys(issues)), "blocked": bool(issues), "explanation": explanation if issues else "",

@@ -1,0 +1,53 @@
+{
+  "about": "Unmodified KDE files used by tests/test_kde_files.py. Refresh with scripts/fetch-kde-files.py --update; CI also tests the latest versions.",
+  "files": {
+    "BreezeDark.colors": {
+      "project": "plasma/breeze",
+      "path": "colors/BreezeDark.colors",
+      "use": "Color scheme copied into kdeglobals when selected in System Settings",
+      "license": "LGPL-2.0-or-later (SPDX header)",
+      "branch": "master",
+      "commit": "b0832e7e6f974e64f59e593bc43704ea59108636"
+    },
+    "BreezeLight.colors": {
+      "project": "plasma/breeze",
+      "path": "colors/BreezeLight.colors",
+      "use": "Color scheme copied into kdeglobals when selected in System Settings",
+      "license": "LGPL-2.0-or-later (SPDX header)",
+      "branch": "master",
+      "commit": "b0832e7e6f974e64f59e593bc43704ea59108636"
+    },
+    "BreezeClassic.colors": {
+      "project": "plasma/breeze",
+      "path": "colors/BreezeClassic.colors",
+      "use": "Color scheme copied into kdeglobals when selected in System Settings",
+      "license": "LGPL-2.0-or-later (SPDX header)",
+      "branch": "master",
+      "commit": "b0832e7e6f974e64f59e593bc43704ea59108636"
+    },
+    "lookandfeel-breezedark-defaults": {
+      "project": "plasma/plasma-workspace",
+      "path": "lookandfeel/org.kde.breezedark/contents/defaults",
+      "use": "KConfig file with nested groups ([kdeglobals][General])",
+      "license": "no SPDX header; distributed with plasma-workspace (GPL-2.0-or-later)",
+      "branch": "master",
+      "commit": "cf2d4c719b82866f1fcaea45089c9f899cdc8f23"
+    },
+    "konsolerc": {
+      "project": "utilities/konsole",
+      "path": "data/konsolerc",
+      "use": "Konsole's default konsolerc",
+      "license": "no SPDX header; distributed with Konsole (GPL-2.0-or-later)",
+      "branch": "master",
+      "commit": "10e9f9108456f7d95ba3e5ef1ecd2d12ed78e974"
+    },
+    "Breeze.colorscheme": {
+      "project": "utilities/konsole",
+      "path": "data/color-schemes/Breeze.colorscheme",
+      "use": "The color groups a Konsole color scheme defines",
+      "license": "no SPDX header; distributed with Konsole (GPL-2.0-or-later)",
+      "branch": "master",
+      "commit": "10e9f9108456f7d95ba3e5ef1ecd2d12ed78e974"
+    }
+  }
+}

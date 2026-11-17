@@ -68,7 +68,7 @@ CAPABILITIES = {
 }
 # Settings files edited key by key. Qt tools rewrite their whole file on save,
 # so values are compared the way QSettings reads them.
-INI_FILES = {"foot": {"root": True}, "mako": {"root": True}, "dunst": {}, "plasma": {}, "polybar": {},
+INI_FILES = {"foot": {"root": True}, "mako": {"root": True}, "dunst": {}, "plasma": {"kde": True}, "polybar": {},
              "qt": {"same": formats.qsettings_same}}
 
 
@@ -114,7 +114,7 @@ def merger(paths, path):
         if component == "vscode" or component == "t3code" and path == files[0]:
             return structured.merge
         if component == "konsole":
-            return functools.partial(merge.ini, same=formats.qsettings_same)
+            return functools.partial(merge.ini, same=formats.qsettings_same, kde=True)
         if component == "btop":
             return functools.partial(merge.ini, root=True)
         if component == "qt" and path == files[2]:
@@ -270,7 +270,10 @@ def render(component, value):
         def rgb(color):
             return ",".join(str(int(color[i:i + 2], 16)) for i in (1, 3, 5))
         groups = {}
-        for name in ("Window", "View", "Button", "Selection", "Tooltip", "Complementary", "Header"):
+        # Every color set KDE's own schemes define, including the inactive
+        # window header set ([Colors:Header][Inactive]) added in Plasma 5.23.
+        for name in ("Window", "View", "Button", "Selection", "Tooltip", "Complementary", "Header",
+                     "Header][Inactive"):
             selected = name == "Selection"
             groups["Colors:" + name] = {"BackgroundNormal": rgb(accent if selected else bg),
                 "BackgroundAlternate": rgb(accent if selected else bg),
@@ -280,7 +283,8 @@ def render(component, value):
                 "ForegroundNeutral": rgb(c["c3"]), "ForegroundPositive": rgb(c["c2"]),
                 "DecorationFocus": rgb(accent), "DecorationHover": rgb(c["secondary"])}
         groups["WM"] = {"activeBackground": rgb(accent), "activeForeground": rgb(bg),
-                        "inactiveBackground": rgb(bg), "inactiveForeground": rgb(fg)}
+                        "activeBlend": rgb(bg), "inactiveBackground": rgb(bg),
+                        "inactiveForeground": rgb(fg), "inactiveBlend": rgb(fg)}
         return formats.ini("", groups)
     if component == "qt":
         # QPalette role order through PlaceholderText (Qt 5.12+); older versions
@@ -359,7 +363,13 @@ def transform(paths, component, originals, value):
                 text = re.sub(r"(?m)^(\s*initial-color-theme\s*=\s*)2\s*$", r"\g<1>light", text)
             elif "colors2" in formats.sections(text):
                 updates["colors2"] = updates["colors"]
-        texts[first] = formats.ini(text, updates, root=component in ("mako", "foot"))
+        try:
+            texts[first] = formats.ini(text, updates, root=component in ("mako", "foot"),
+                                       kde=component == "plasma")
+        except formats.LineError as exc:
+            if component != "plasma":
+                raise
+            raise exc.at(first) from None
     elif component == "polybar":
         if re.search(r"(?m)^\s*(?:include-file|include-directory)\s*=", text):
             raise ValueError("Polybar includes require manual resolution or standalone export.")
@@ -462,6 +472,9 @@ def inspect(paths, component):
     report = {"sources": [], "issues": [], "inputs": [], "has_existing_colors": False,
               "scope": CAPABILITIES[component] + " Later edits to other settings are kept; "
                        "changing the managed colors yourself pauses updates and disconnection."}
+    # Validate syntax without importing Pillow or generating a palette.
+    sample = {"special": {"background": "#111111", "foreground": "#eeeeee", "cursor": "#eeeeee"},
+              "colors": {f"color{i}": "#99bbdd" for i in range(16)}, "wallpaper": "/tmp/preview.png"}
     try:
         config_paths = targets(paths, component)
         report["path"] = str(config_paths[0])
@@ -481,14 +494,24 @@ def inspect(paths, component):
                 continue
             if component == "waybar" and name != str(config_paths[0]):
                 continue  # Reload preferences are not color sources.
+            if component == "plasma":
+                # Only the settings this adapter replaces; KDE's color effects
+                # and everything else in kdeglobals stay as they are.
+                managed = ini_values(render(component, sample))
+                try:
+                    lines = list(formats.ini_lines(changes.text_of(state), kde=True))
+                except formats.LineError as exc:
+                    raise exc.at(name) from None
+                for number, _, section, key, value, _ in lines:
+                    if key in managed.get(section, {}):
+                        report["sources"].append(dict(path=name, line=number, directive=f"[{section}] {key}",
+                                                      value="(deleted)" if value is None else value, kind="color"))
+                continue
             for line, text in enumerate(changes.text_of(state).splitlines(), 1):
                 if re.search(r"color|background|foreground|client\.|@theme|@import|zle_highlight|\bbg\b|defaultTheme|source-file", text, re.I):
                     report["sources"].append(dict(path=name, line=line, directive="appearance",
                                                   value=text, kind="color"))
         report["has_existing_colors"] = bool(report["sources"])
-        # Validate syntax without importing Pillow or generating a palette.
-        sample = {"special": {"background": "#111111", "foreground": "#eeeeee", "cursor": "#eeeeee"},
-                  "colors": {f"color{i}": "#99bbdd" for i in range(16)}, "wallpaper": "/tmp/preview.png"}
         transform(paths, component, originals if record else states, sample)
         if component == "rofi":
             original = changes.text_of((originals if record else states)[str(config_paths[0])])
@@ -499,6 +522,8 @@ def inspect(paths, component):
             report["has_existing_colors"] |= bool(dependency_report["sources"])
     except (OSError, ValueError, UnicodeError) as exc:
         report["issues"].append(str(exc))
+        # The owning program accepts the file; Linux Theming cannot edit it yet.
+        report["unreadable"] = isinstance(exc, formats.Unreadable)
     return report
 
 
