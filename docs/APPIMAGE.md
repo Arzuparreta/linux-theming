@@ -208,10 +208,13 @@ SHA-256 first. The engine (`linux_theming/updates.py`) then:
    replaced since the check is never overwritten; reopening the dialog after such
    a change, or a refused install, withdraws the offer until the next check.
 
-**Cancel** is honoured until the rename starts. It takes effect when the current
-network read returns (at most 30 seconds) or within half a second while a program
-is being verified; a verification probe is stopped with every process it started.
-A download slower than about 1 KB/s for a whole minute stops with an explanation.
+**Cancel** is honoured until the rename starts and takes effect within about half
+a second: an open connection is shut down, even mid-read, and a verification probe
+is stopped with every process in its group (escalating to SIGKILL). Release
+information must arrive within 60 seconds, and a download slower than about
+1 KB/s for a whole minute stops with an explanation, so a stalled server can never
+keep the application from closing. If the rename succeeded but could not be
+synchronised to disk, both versions are kept.
 
 Running windows keep their original file until they restart. **Restart now** waits
 until this process has exited, so the single-instance endpoint and the AppImage

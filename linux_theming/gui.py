@@ -443,7 +443,8 @@ class Controller(QObject):
                                 sha256=asset.get("sha256", ""), confirmed=asset.get("confirmed", False),
                                 mirror=result.get("mirror", ""), path=target["path"], problem=target["problem"],
                                 error="", **with_stamp)
-        self.run_update(lambda work: updates.check(), complete)
+        # Cancelled by shutdown: a stalled server never holds the application open.
+        self.run_update(lambda work: updates.check(cancelled=work.cancel.is_set), complete)
 
     @Slot()
     def automaticUpdateCheck(self):
@@ -477,8 +478,10 @@ class Controller(QObject):
             elif error:
                 self.publish_update(status="error", error=error, notice="", **common)
             elif result["version"] == updates.__version__:
-                # Switched back to the version this window runs: nothing awaits a restart.
+                # Switched back to the version this window runs: nothing awaits a restart,
+                # and the file is again the one this window can vouch for.
                 self._update_release, self._offer_target, self._update_retry = None, {}, "check"
+                self._startup_target = dict(target)
                 self.publish_update(status="idle", installed="", restored=False, error="",
                                     notice=f"Version {result['version']} is back in place. No restart is needed.",
                                     **common)

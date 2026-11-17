@@ -45,6 +45,7 @@ class Release(http.server.ThreadingHTTPServer):
         self.asset_url = None
         self.length = None
         self.slow = False
+        self.crawl = False
         self.status = 200
         self.headers = {}
         self.requests = []
@@ -95,7 +96,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(server.length if server.length is not None else len(body)))
         self.end_headers()
         with contextlib.suppress(OSError):
-            if server.slow:  # A connection that trickles data and never times out.
+            if server.crawl and self.path == "/releases/latest":  # One byte at a time.
+                for index in range(len(body)):
+                    self.wfile.write(body[index:index + 1])
+                    self.wfile.flush()
+                    time.sleep(0.05)
+            elif server.slow:  # A connection that trickles data and never times out.
                 for start in range(0, len(body), 1024):
                     self.wfile.write(body[start:start + 1024])
                     self.wfile.flush()
@@ -248,6 +254,19 @@ class UpdateTests(unittest.TestCase):
         self.server.status, self.server.headers = 404, {}
         with self.assertRaisesRegex(updates.UpdateError, "no published release information"):
             self.check()
+
+    def test_trickling_release_information_is_bounded_and_cancellable(self):
+        self.server.crawl = True
+        started = time.monotonic()
+        with (patch.object(updates, "METADATA_DEADLINE", 0.5),
+              self.assertRaisesRegex(updates.UpdateError, "did not finish sending the release information")):
+            self.check()
+        self.assertLess(time.monotonic() - started, 5)
+        started = time.monotonic()
+        with self.assertRaises(updates.Cancelled):
+            updates.check(current="8.0.0", machine="x86_64", environ=self.environ,
+                          cancelled=lambda: time.monotonic() - started > 0.3)
+        self.assertLess(time.monotonic() - started, 5)
 
     def test_check_rejects_invalid_json(self):
         with (patch.object(Release, "release", lambda _self: "not an object"),
@@ -416,6 +435,21 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(self.installed.read_bytes(), self.server.body)
         self.assertEqual(len(self.kept_files()), 2)
 
+    def test_unsynchronised_rename_keeps_both_versions(self):
+        self.install()
+        real = updates.changes.sync_directory
+
+        def failing(path):
+            if Path(path) == self.apps:
+                raise OSError(5, "Input/output error")
+            return real(path)
+        with patch("linux_theming.updates.changes.sync_directory", side_effect=failing):
+            updates.restore(self.paths, self.target(), current="9.0.0")  # Replaced; durability unknown.
+        self.assertIn(b"old", self.installed.read_bytes()[:16])
+        self.assertEqual(len(self.kept_files()), 4)
+        self.assertEqual(updates.read_previous(self.paths, "8.0.0")["version"], "9.0.0")
+        self.assertEqual(updates.read_previous(self.paths, "9.0.0")["version"], "8.0.0")
+
     def test_too_slow_downloads_stop(self):
         self.server.slow = True
         with (patch.multiple(updates, SLOW_WINDOW=0.3, SLOW_BYTES=1 << 30),
@@ -502,7 +536,8 @@ class UpdateTests(unittest.TestCase):
     def test_probe_timeout_and_cancel_stop_every_process_it_started(self):
         script = self.root / "stalls"
         pids = self.root / "pids"
-        script.write_text(f'#!/bin/sh\nsleep 60 &\necho $! > "{pids}"\nsleep 60\n')
+        # The child ignores SIGTERM and outlives the probe's own process.
+        script.write_text(f'#!/bin/sh\nsh -c \'trap "" TERM; exec sleep 60\' &\necho $! > "{pids}"\nsleep 60\n')
         script.chmod(0o700)
         for options, error in (({"timeout": 1}, "did not start within 1 seconds"),
                                ({"cancelled": lambda: True}, "cancelled")):

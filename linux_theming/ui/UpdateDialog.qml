@@ -33,7 +33,7 @@ Sheet {
     }
     function amount(value) { return value >= 10000000 ? Math.round(value / 1000000) + " MB" : (value / 1000000).toFixed(1) + " MB" }
     function phaseText() {
-        if (u.cancelling) return "Cancelling… This can take up to 30 seconds."
+        if (u.cancelling) return "Cancelling…"
         const restoring = u.operation === "restore"
         switch (u.phase) {
         case "download": return restoring ? "Copying the kept version " + (u.previous.version || "") + "…"

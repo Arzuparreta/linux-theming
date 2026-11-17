@@ -329,7 +329,7 @@ class UpdateDialogTests(unittest.TestCase):
         updates.save_preferences(self.paths, automatic=True)
         answer = threading.Event()
 
-        def slow_check():
+        def slow_check(**_options):
             answer.wait(5)
             return RELEASE
         with patch("linux_theming.updates.check", side_effect=slow_check):
@@ -392,6 +392,38 @@ class UpdateDialogTests(unittest.TestCase):
         self.controller.publish(busy=False)
         self.app.processEvents()
         self.assertTrue(self.enabled("restartUpdate"))
+
+    def test_shutdown_does_not_wait_for_a_stalled_server(self):
+        import http.server
+
+        class Crawl(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+                for _ in range(600):  # One byte every 0.1 s: never reaches the socket timeout.
+                    try:
+                        self.wfile.write(b" ")
+                        self.wfile.flush()
+                    except OSError:
+                        return
+                    time.sleep(0.1)
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Crawl)
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        with patch.dict(os.environ, {updates.SOURCE_VARIABLE: f"http://127.0.0.1:{server.server_port}"}):
+            self.open()
+            self.controller.checkForUpdates()
+            QTest.qWait(500)
+            self.assertIsNotNone(self.controller._update_work)
+            started = time.monotonic()
+            self.controller.shutdown()
+        self.assertLess(time.monotonic() - started, 3)
 
     def test_automatic_check_is_opt_in_daily_and_quiet(self):
         with patch("linux_theming.updates.check") as check:

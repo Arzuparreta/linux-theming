@@ -27,10 +27,12 @@ import re
 import secrets
 import shutil
 import signal
+import socket
 import ssl
 import stat
 import subprocess
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -51,7 +53,8 @@ MIN_SIZE, MAX_SIZE = 1 << 20, 1 << 30
 METADATA_LIMIT = 2 << 20
 CHECKSUM_LIMIT = 4096
 CHUNK = 1 << 16
-TIMEOUT = 30  # Longest wait for any network answer, and so for a cancel to take effect.
+TIMEOUT = 30  # Longest wait for any single network answer.
+METADATA_DEADLINE = 60  # Whole request, connection to last byte, for release information.
 # A connection that trickles data never reaches the socket timeout. Below this rate
 # over a whole window the download stops (64 KiB per minute, about 1 KB/s).
 SLOW_WINDOW, SLOW_BYTES = 60, 64 << 10
@@ -175,9 +178,84 @@ class _Redirects(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+_watching = threading.local()
+
+
+class _Watch:
+    """Stops a request when it is cancelled or past its deadline, even mid-read.
+
+    A server that trickles bytes never reaches the socket timeout. Shutting the
+    socket down from this watcher wakes any blocked read immediately, including
+    one still receiving headers.
+    """
+
+    def __init__(self, cancelled=lambda: False, seconds=None):
+        self.cancelled = cancelled
+        self.deadline = None if seconds is None else time.monotonic() + seconds
+        self.sockets, self.reason = [], ""
+        self._done = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="update-watch", daemon=True)
+
+    def __enter__(self):
+        self._previous = getattr(_watching, "current", None)
+        _watching.current = self
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc):
+        _watching.current = self._previous
+        self._done.set()
+        self._thread.join()
+
+    def _run(self):
+        while not self._done.wait(0.1):
+            if self.cancelled():
+                self.reason = "cancelled"
+            elif self.deadline is not None and time.monotonic() > self.deadline:
+                self.reason = "deadline"
+            else:
+                continue
+            for sock in list(self.sockets):
+                with contextlib.suppress(OSError):
+                    # The plain socket method: SSLSocket.shutdown also drops its TLS
+                    # state, which the reading thread may be using.
+                    socket.socket.shutdown(sock, socket.SHUT_RDWR)
+            return
+
+    def stopped(self, what):
+        if self.reason == "cancelled":
+            return Cancelled("The update was cancelled. Nothing was replaced.")
+        if self.reason == "deadline":
+            return UpdateError(f"GitHub did not finish sending the {what} in time. Try again later.")
+        return None
+
+
+def _watched(connection):
+    class Watched(connection):
+        def connect(self):
+            super().connect()
+            current = getattr(_watching, "current", None)
+            if current is not None:
+                current.sockets.append(self.sock)
+    return Watched
+
+
+class _HTTP(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        return self.do_open(_watched(http.client.HTTPConnection), req)
+
+
+class _HTTPS(urllib.request.HTTPSHandler):
+    def __init__(self, context):
+        super().__init__(context=context)
+        self.tls = context
+
+    def https_open(self, req):
+        return self.do_open(_watched(http.client.HTTPSConnection), req, context=self.tls)
+
+
 def opener(source_value, environ=None):
-    return urllib.request.build_opener(urllib.request.HTTPSHandler(context=tls_context(environ)),
-                                       _Redirects(source_value.loopback))
+    return urllib.request.build_opener(_HTTP(), _HTTPS(tls_context(environ)), _Redirects(source_value.loopback))
 
 
 def _request(url, accept):
@@ -205,12 +283,24 @@ def _explain(exc, what):
     return UpdateError(f"GitHub could not be reached for the {what}: {reason}. Check the connection and try again.")
 
 
-def _fetch(transport, url, limit, *, accept, what):
-    try:
-        with transport.open(_request(url, accept), timeout=TIMEOUT) as response:
-            data = response.read(limit + 1)
-    except (OSError, http.client.HTTPException) as exc:
-        raise _explain(exc, what) from exc
+def _fetch(transport, url, limit, *, accept, what, cancelled=lambda: False):
+    with _Watch(cancelled, METADATA_DEADLINE) as watch:
+        try:
+            with transport.open(_request(url, accept), timeout=TIMEOUT) as response:
+                data = b""
+                read = getattr(response, "read1", response.read)
+                while len(data) <= limit:
+                    if watch.reason:
+                        break
+                    block = read(min(CHUNK, limit + 1 - len(data)))
+                    if not block:
+                        break
+                    data += block
+        except (OSError, http.client.HTTPException) as exc:
+            raise (watch.stopped(what) or _explain(exc, what)) from exc
+        stopped = watch.stopped(what)
+    if stopped:
+        raise stopped
     if len(data) > limit:
         raise UpdateError(f"The {what} is larger than expected; it was not used.")
     return data
@@ -218,12 +308,12 @@ def _fetch(transport, url, limit, *, accept, what):
 
 # --- Checking --------------------------------------------------------------------
 
-def check(*, current=__version__, machine=None, environ=None, transport=None):
+def check(*, current=__version__, machine=None, environ=None, transport=None, cancelled=lambda: False):
     """Read the latest release. Downloads only metadata and the small checksum file."""
     src = source(environ)
     transport = transport or opener(src, environ)
     raw = _fetch(transport, src.api, METADATA_LIMIT, accept="application/vnd.github+json",
-                 what="release information")
+                 what="release information", cancelled=cancelled)
     try:
         release = json.loads(raw)
     except ValueError:
@@ -257,7 +347,7 @@ def check(*, current=__version__, machine=None, environ=None, transport=None):
     if name + ".sha256" not in assets:
         raise UpdateError(f"Release {tag} has no {name}.sha256 checksum file; it was not used.")
     text = _fetch(transport, url + ".sha256", CHECKSUM_LIMIT, accept="application/octet-stream",
-                  what="checksum file").decode("ascii", "replace").strip()
+                  what="checksum file", cancelled=cancelled).decode("ascii", "replace").strip()
     match = CHECKSUM_LINE.fullmatch(text)
     if not match or match.group(2) != name:
         raise UpdateError(f"The checksum file of release {tag} does not describe {name}.")
@@ -381,18 +471,31 @@ def child_environment(environ=None):
     return env
 
 
+def _group_alive(group):
+    try:
+        os.killpg(group, 0)
+    except (ProcessLookupError, PermissionError):
+        return False
+    return True
+
+
 def _terminate(process):
-    """Stop the probe and everything it started (the runtime forks the payload)."""
-    for sig, wait in ((signal.SIGTERM, 3), (signal.SIGKILL, 5)):
-        try:
-            os.killpg(process.pid, sig)
-        except (ProcessLookupError, PermissionError):
-            break
-        try:
-            process.wait(wait)
-            break
-        except subprocess.TimeoutExpired:
-            continue
+    """Stop the probe and everything in its process group (the runtime forks the payload).
+
+    The group is escalated to SIGKILL while any member remains, whether or not the
+    leader has exited, and this returns once the group is empty (or after 10 s).
+    """
+    group = process.pid
+    for sig, wait in ((signal.SIGTERM, 3), (signal.SIGKILL, 7)):
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(group, sig)
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline:
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                process.wait(0.05)  # Reaps the leader; others are reaped by their new parent.
+            if not _group_alive(group):
+                return
+            time.sleep(0.05)
 
 
 def program_version(path, *, extract_and_run=False, scratch=None, timeout=PROBE_TIMEOUT, what="downloaded program",
@@ -643,7 +746,12 @@ def _remove_scratch(paths):
 
 
 def _commit(paths, target, staged, identity, previous, cancelled):
-    """Replace the AppImage, then drop older kept copies. On failure, the new copy goes."""
+    """Replace the AppImage, then drop older kept copies.
+
+    Before the rename, a failure removes only the copy just made. After it, every
+    kept copy stays unless the rename is known to be durable: an interrupted or
+    unsynchronised replacement still has a way back to either version.
+    """
     try:
         if cancelled():  # The last point at which cancelling is honoured.
             raise Cancelled("The update was cancelled. Nothing was replaced.")
@@ -651,16 +759,21 @@ def _commit(paths, target, staged, identity, previous, cancelled):
     except BaseException:
         _forget_kept(previous)
         raise
-    _commit_previous(paths, previous)
+    try:
+        changes.sync_directory(Path(target["path"]).parent)
+    except OSError:
+        return  # Replaced, durability unknown: keep both versions.
+    with contextlib.suppress(OSError):
+        _commit_previous(paths, previous)
 
 
 def _replace(target, staged, identity):
+    """Everything up to and including the rename; raises only if nothing was replaced."""
     _unchanged(target)
     mode = stat.S_IMODE(os.stat(target["path"]).st_mode) | stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR
     _same_staged(staged, identity, mode)
     _unchanged(target)  # As late as possible before the rename.
     os.replace(staged, target["path"])
-    changes.sync_directory(Path(target["path"]).parent)
 
 
 def install(paths, release, target, *, progress=lambda *_: None, cancelled=lambda: False,
@@ -678,16 +791,17 @@ def install(paths, release, target, *, progress=lambda *_: None, cancelled=lambd
         transport = transport or opener(src, environ)
         staged = _staging(target)
         try:
-            try:
-                response = transport.open(_request(asset["url"], "application/octet-stream"), timeout=TIMEOUT)
-            except (OSError, http.client.HTTPException) as exc:
-                raise _explain(exc, "AppImage") from exc
-            with response:
-                declared = response.headers.get("Content-Length")
-                if declared is not None and declared.strip() != str(asset["size"]):
-                    raise UpdateError("The download size differs from the release. Nothing was replaced.")
-                checksum, identity = _copy_hashed(response, staged, asset["size"], progress=progress,
-                                                  cancelled=cancelled, phase="download")
+            with _Watch(cancelled) as watch:
+                try:
+                    response = transport.open(_request(asset["url"], "application/octet-stream"), timeout=TIMEOUT)
+                except (OSError, http.client.HTTPException) as exc:
+                    raise (watch.stopped("AppImage") or _explain(exc, "AppImage")) from exc
+                with response:
+                    declared = response.headers.get("Content-Length")
+                    if declared is not None and declared.strip() != str(asset["size"]):
+                        raise UpdateError("The download size differs from the release. Nothing was replaced.")
+                    checksum, identity = _copy_hashed(response, staged, asset["size"], progress=progress,
+                                                      cancelled=cancelled, phase="download")
             if checksum != asset["sha256"]:
                 raise UpdateError("The download does not match the release checksum. Nothing was replaced.")
             progress("verify", 0, 0)
