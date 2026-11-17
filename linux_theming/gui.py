@@ -110,9 +110,10 @@ class Controller(QObject):
         self._offer_target = {}  # The AppImage as it was when the offered release was checked.
         self._update_retry = ""
         self._restore_from = ""  # Update status when a switch to the kept copy started.
-        # The file this window was started from. If it changes later, the version on
-        # disk is unknown here and no update or switch is offered until a restart.
-        self._startup_target = updates.installation()
+        # The AppImage file this window can vouch for, and the version in it: the one
+        # started, then whatever this window installed. Any other change to the file
+        # makes its version unknown here; nothing is offered until a restart.
+        self._disk = {"fingerprint": updates.installation().get("fingerprint"), "version": updates.__version__}
         self.relaunch_arguments = None
         self._revision = 0
         self._preview_work = None
@@ -343,15 +344,14 @@ class Controller(QObject):
                 "path": "", "problem": "", "sourceProblem": problem, "mirror": mirror, "phase": "", "done": 0, "total": 0,
                 "error": "", "notice": "", "automatic": preference["automatic"],
                 "lastCheck": preference["last_check"], "previous": {}, "installed": "", "restored": False,
-                "operation": "", "cancelling": False, "retry": "check", "keptIn": str(updates.directory(self.paths) / "previous")}
+                "operation": "", "cancelling": False, "settingError": "", "retry": "check", "keptIn": str(updates.directory(self.paths) / "previous")}
 
     def publish_update(self, **values):
         self.publish(update=dict(self._state["update"], retry=self._update_retry or "check", **values))
 
     def disk_version(self):
         """The version in the AppImage file: the running one unless an install awaits a restart."""
-        state = self._state["update"]
-        return state["installed"] if state["status"] == "installed" else updates.__version__
+        return self._disk["version"]
 
     def previous_update(self):
         saved = updates.read_previous(self.paths, self.disk_version())
@@ -376,11 +376,10 @@ class Controller(QObject):
 
     def current_target(self):
         target = updates.installation()
-        started = self._startup_target.get("fingerprint")
-        if (not target["problem"] and started and target["fingerprint"] != started
-                and self._state["update"]["status"] != "installed"):
-            target = dict(target, problem=f"{target['path']} was replaced after this window started, so the "
-                          "version it contains is unknown here. Restart Linux Theming, then check again.")
+        known = self._disk.get("fingerprint")
+        if not target["problem"] and known and target["fingerprint"] != known:
+            target = dict(target, problem=f"{target['path']} was replaced outside this window, so the version "
+                          "it contains is unknown here. Restart Linux Theming, then check again.")
         return target
 
     @Slot()
@@ -390,9 +389,12 @@ class Controller(QObject):
         preference = updates.preferences(self.paths)
         if self._update_work is not None:
             # A check or install is running: show where it goes, change nothing.
-            shown = self._offer_target if self._state["update"]["status"] == "working" else target
+            status = self._state["update"]["status"]
+            shown = self._offer_target if status == "working" else target
+            # An automatic check runs quietly; once the dialog is open, show it as checking.
             self.publish_update(path=shown.get("path", ""), problem=shown.get("problem", ""),
-                                automatic=preference["automatic"], lastCheck=preference["last_check"])
+                                automatic=preference["automatic"], lastCheck=preference["last_check"],
+                                **({"status": "checking"} if status in ("idle", "current", "error") else {}))
             return
         self._update_target = target
         stale = {}
@@ -423,9 +425,11 @@ class Controller(QObject):
                 with_stamp = {"lastCheck": updates.save_preferences(self.paths, last_check=updates.stamp())["last_check"]}
             except (OSError, ValueError) as exc:
                 print(f"Update check time could not be saved: {exc}", file=sys.stderr)
+            # An automatic check stays quiet unless the dialog was opened meanwhile.
+            quiet = automatic and self._state["update"]["status"] != "checking"
             if error:
                 self._update_release = None
-                if automatic:
+                if quiet:
                     print(f"Automatic update check failed: {error}", file=sys.stderr)
                     self.publish_update(**with_stamp)
                 else:
@@ -435,7 +439,7 @@ class Controller(QObject):
             self._update_release = result if available else None
             self._offer_target = dict(target) if available else {}
             asset = result.get("asset", {})
-            if automatic and not available:
+            if quiet and not available:
                 self.publish_update(**with_stamp)
                 return
             self.publish_update(status=result["status"], version=result["version"], page=result["page"],
@@ -459,8 +463,10 @@ class Controller(QObject):
 
     def finish_update(self, restored):
         def complete(result, error):
-            # After a successful install the file differs from the one started, by design.
-            self._update_target = target = self.current_target() if error else updates.installation()
+            if not error:  # The file this window just installed and verified.
+                self._disk = {"fingerprint": result.get("fingerprint") or updates.installation().get("fingerprint"),
+                              "version": result["version"]}
+            self._update_target = target = self.current_target()
             common = {"phase": "", "cancelling": False, "path": target["path"], "problem": target["problem"]}
             offered = self._offer_target.get("fingerprint")
             if error and offered and target.get("fingerprint") != offered:
@@ -481,7 +487,6 @@ class Controller(QObject):
                 # Switched back to the version this window runs: nothing awaits a restart,
                 # and the file is again the one this window can vouch for.
                 self._update_release, self._offer_target, self._update_retry = None, {}, "check"
-                self._startup_target = dict(target)
                 self.publish_update(status="idle", installed="", restored=False, error="",
                                     notice=f"Version {result['version']} is back in place. No restart is needed.",
                                     **common)
@@ -556,9 +561,10 @@ class Controller(QObject):
         try:
             preference = updates.save_preferences(self.paths, automatic=bool(enabled))
         except (OSError, ValueError) as exc:
-            self.publish_update(error=f"The update setting could not be saved: {exc}", status="error")
+            # Separate from the operation status: a running install keeps its progress and Cancel.
+            self.publish_update(settingError=f"The update setting could not be saved: {exc}")
             return
-        self.publish_update(automatic=preference["automatic"])
+        self.publish_update(automatic=preference["automatic"], settingError="")
 
     @Slot(bool)
     def restartAfterUpdate(self, quick):

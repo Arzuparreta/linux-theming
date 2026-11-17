@@ -2,9 +2,9 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-// Explicit updates from GitHub Releases. Checking contacts GitHub and downloads
-// nothing; the AppImage is replaced only after Download and install, once the
-// download has been verified. The replaced version is kept for switching back.
+// Explicit updates from GitHub Releases. Checking reads release information only;
+// the AppImage is replaced only after Download and install, once the download has
+// been verified. The replaced version is kept for switching back.
 Sheet {
     id: dialog
     required property QtObject controller
@@ -16,6 +16,7 @@ Sheet {
     readonly property bool canChange: canCheck && !u.problem && !!u.path
     // After an install or switch that awaits a restart, the file holds another version.
     readonly property string diskVersion: u.status === "installed" ? u.installed : u.current
+    property bool confirmDelete: false
     readonly property bool themeBusy: !!controller.viewState.busy
     property bool confirmRestore: false
     signal restartRequested()
@@ -25,7 +26,31 @@ Sheet {
     closePolicy: working ? Popup.NoAutoClose : Popup.CloseOnEscape
     title: "Updates"
     subtitle: "Linux Theming " + u.current + (u.path ? " · " + homePath(u.path) : "")
-    onOpened: { confirmRestore = false; controller.openUpdates() }
+    onOpened: { confirmRestore = false; confirmDelete = false; scroll.contentItem.contentY = 0; controller.openUpdates() }
+
+    // Keyboard focus never lands outside the visible part of the scrolling content.
+    function reveal(item) {
+        let parent = item
+        while (parent && parent !== sections) parent = parent.parent
+        if (!parent) return
+        const flick = scroll.contentItem
+        const top = item.mapToItem(sections, 0, 0).y - 8
+        const bottom = top + item.height + 16
+        if (top < flick.contentY) flick.contentY = Math.max(0, top)
+        else if (bottom > flick.contentY + scroll.height)
+            flick.contentY = Math.min(Math.max(0, sections.height - scroll.height), bottom - scroll.height)
+    }
+    function page(direction) {
+        const flick = scroll.contentItem
+        flick.contentY = Math.max(0, Math.min(Math.max(0, sections.height - scroll.height),
+                                              flick.contentY + direction * scroll.height * 0.9))
+    }
+    Connections {
+        target: dialog.visible && dialog.contentItem ? dialog.contentItem.Window.window : null
+        function onActiveFocusItemChanged() { dialog.reveal(target.activeFocusItem) }
+    }
+    Shortcut { sequences: [StandardKey.MoveToNextPage]; enabled: dialog.visible; onActivated: dialog.page(1) }
+    Shortcut { sequences: [StandardKey.MoveToPreviousPage]; enabled: dialog.visible; onActivated: dialog.page(-1) }
 
     function homePath(path) {
         const home = controller.homePath
@@ -262,13 +287,21 @@ Sheet {
                     text: "Check for updates when Linux Theming starts"
                     description: "At most once a day. It only checks; downloading and installing always wait for you."
                     checked: !!u.automatic
-                    onToggled: controller.setAutomaticUpdates(checked)
+                    // The saved setting decides; restore the binding broken by the click.
+                    onToggled: { controller.setAutomaticUpdates(checked); checked = Qt.binding(() => !!dialog.u.automatic) }
+                }
+                Banner {
+                    objectName: "updateSettingError"
+                    Layout.fillWidth: true
+                    visible: !!u.settingError
+                    tone: "warning"
+                    title: u.settingError || ""
                 }
 
                 RowLayout {
                     objectName: "keptVersion"
                     Layout.fillWidth: true
-                    visible: !!u.previous.version && !confirmRestore
+                    visible: !!u.previous.version && !confirmRestore && !confirmDelete
                     spacing: 8
                     Text {
                         Layout.fillWidth: true
@@ -279,7 +312,7 @@ Sheet {
                         elide: Text.ElideRight
                         textFormat: Text.PlainText
                     }
-                    Command { objectName: "deleteKept"; compact: true; quiet: true; text: "Delete copy"; enabled: canChange; onClicked: controller.discardPrevious() }
+                    Command { objectName: "deleteKept"; compact: true; quiet: true; text: "Delete copy"; enabled: canChange; onClicked: confirmDelete = true }
                     Command { objectName: "switchToKept"; visible: u.previous.version !== diskVersion; compact: true; text: "Switch to " + (u.previous.version || "") + "…"; enabled: canChange; onClicked: confirmRestore = true }
                 }
                 Banner {
@@ -293,6 +326,17 @@ Sheet {
                     Command { compact: true; quiet: true; text: "Cancel"; onClicked: confirmRestore = false }
                     Command { objectName: "confirmSwitchButton"; compact: true; text: "Switch to " + (u.previous.version || ""); enabled: canChange; onClicked: { confirmRestore = false; controller.restorePrevious() } }
                 }
+                Banner {
+                    objectName: "confirmDelete"
+                    Layout.fillWidth: true
+                    visible: confirmDelete && !!u.previous.version
+                    tone: "warning"
+                    title: "Delete the kept copy of version " + (u.previous.version || "") + "?"
+                    body: "This frees " + (u.previous.sizeText || "") + ". Switching back to " + (u.previous.version || "")
+                          + " then requires downloading it again from GitHub Releases."
+                    Command { compact: true; quiet: true; text: "Cancel"; onClicked: confirmDelete = false }
+                    Command { objectName: "confirmDeleteButton"; compact: true; danger: true; text: "Delete copy"; enabled: canChange; onClicked: { confirmDelete = false; controller.discardPrevious() } }
+                }
 
             }
         }
@@ -300,6 +344,15 @@ Sheet {
             Layout.fillWidth: true
             Command { objectName: "closeUpdates"; text: u.status === "installed" ? "Later" : "Close"; enabled: !working; onClicked: dialog.close() }
             Item { Layout.fillWidth: true }
+            Command {
+                objectName: "checkAgain"
+                // Leave an old offer or a failed install for the latest release information.
+                visible: u.status === "available" || u.status === "error" && u.retry !== "check"
+                quiet: true
+                text: "Check again"
+                enabled: canCheck
+                onClicked: controller.checkForUpdates()
+            }
             Command { objectName: "cancelUpdate"; visible: working; text: u.cancelling ? "Cancelling…" : "Cancel"; enabled: u.phase !== "install" && !u.cancelling; onClicked: controller.cancelUpdate() }
             Command {
                 objectName: "checkUpdates"

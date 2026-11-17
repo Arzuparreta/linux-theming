@@ -229,11 +229,13 @@ the menu entry keeps working because the path stays the same.
 An AppImage is not updated, and the release page is offered instead, when it was
 not started as an AppImage (source checkouts), is reached through a symbolic link,
 belongs to another user, is in a folder you cannot write (for example `/opt`
-installed by an administrator or package manager), or when its folder or any
-folder above it can be changed by another user (writable by others or by a shared
-group, without the sticky bit). It is also not updated when the file was replaced
-after the window started, because the version it contains is then unknown; restart
-first. Nothing runs as root.
+installed by an administrator or package manager), or when another user could
+change any folder that decides where it resolves: its folder, every folder above
+it, and folders holding symbolic links on the way (writable by others, by a shared
+group, or by users named in an ACL, without the sticky bit). The update state
+folder must be private to you as well, because downloads and kept copies are run
+from there. It is also not updated when the file was replaced outside the running
+window, because the version it contains is then unknown; restart first. Nothing runs as root.
 
 The SHA-256 checks protect against corrupted or truncated downloads and against
 metadata pointing elsewhere. They establish the same trust as downloading the

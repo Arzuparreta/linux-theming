@@ -101,11 +101,14 @@ class UpdateDialogTests(unittest.TestCase):
         QMetaObject.invokeMethod(item, "clicked")
         self.settle()
 
-    def open(self):
+    def open(self, settle=True):
         menu_item = self.window.findChild(QObject, "checkForUpdates")
         self.assertEqual(menu_item.property("text"), "Check for updates…")
         QMetaObject.invokeMethod(menu_item, "triggered")
-        self.settle()
+        if settle:
+            self.settle()
+        else:
+            self.app.processEvents()
         self.assertTrue(self.visible("updateDialog"))
 
     @property
@@ -245,7 +248,7 @@ class UpdateDialogTests(unittest.TestCase):
         self.settle()
         # Replaced by hand after the check (a different file), then the dialog reopens.
         self.target = dict(self.target, fingerprint="9:9:9")
-        self.controller._startup_target = dict(self.target)  # Not the startup-change case.
+        self.controller._disk["fingerprint"] = "9:9:9"  # Not the replaced-outside case.
         self.open()
         self.assertEqual(self.update["status"], "idle")
         self.assertIn("changed after the last check", self.update["notice"])
@@ -267,7 +270,7 @@ class UpdateDialogTests(unittest.TestCase):
         self.target = dict(self.target, fingerprint="7:7:7")
         self.open()
         self.assertTrue(self.visible("updateUnsupported"))
-        self.assertIn("replaced after this window started", self.update["problem"])
+        self.assertIn("replaced outside this window", self.update["problem"])
         with patch("linux_theming.updates.check", return_value=RELEASE):
             self.click("checkUpdates")
         self.assertFalse(self.enabled("installUpdate"))
@@ -334,8 +337,12 @@ class UpdateDialogTests(unittest.TestCase):
             return RELEASE
         with patch("linux_theming.updates.check", side_effect=slow_check):
             self.controller.automaticUpdateCheck()
-            self.open()  # While the request is still running.
+            self.open(settle=False)  # While the request is still running.
+            self.assertIsNotNone(self.controller._update_work)
             self.assertEqual(self.update["path"], str(self.installed))
+            self.assertEqual(self.update["status"], "checking")
+            self.assertFalse(self.enabled("checkUpdates"))
+            self.assertFalse(self.visible("installUpdate"))
             answer.set()
             self.settle()
         self.assertTrue(self.visible("updateAvailable"))
@@ -381,6 +388,85 @@ class UpdateDialogTests(unittest.TestCase):
         self.assertEqual(self.update["status"], "idle")
         self.assertIn("No restart is needed", self.update["notice"])
         self.assertFalse(self.visible("updateIndicator"))
+
+    def test_switch_back_refuses_a_file_replaced_after_installing(self):
+        running = updates.__version__
+        kept = {"version": running, "path": "/k", "size": 78_000_000, "sha256": "b" * 64, "saved": ""}
+        with patch("linux_theming.updates.read_previous",
+                   side_effect=lambda paths, current: kept if current != running else {}):
+            self.available()
+            self.target = dict(self.target, fingerprint="5:5:5")  # What the install produced.
+            with patch("linux_theming.updates.install",
+                       return_value={"version": "9.0.0", "path": "", "previous": {}, "fingerprint": "5:5:5"}):
+                self.click("installUpdate")
+            self.click("switchToKept")
+            self.target = dict(self.target, fingerprint="6:6:6")  # Replaced by hand before confirming.
+            with patch("linux_theming.updates.restore") as restore:
+                self.click("confirmSwitchButton")
+            restore.assert_not_called()
+        self.assertIn("replaced outside this window", self.update["problem"])
+        self.assertTrue(self.visible("updateUnsupported"))
+
+    def test_a_setting_error_does_not_hide_a_running_install(self):
+        self.available()
+        release = threading.Event()
+
+        def install(paths, release_value, target, *, progress, cancelled):
+            progress("download", 1, 78_000_000)
+            release.wait(5)
+            return {"version": "9.0.0", "path": "", "previous": {}, "fingerprint": "1:2:3"}
+        with (patch("linux_theming.updates.install", side_effect=install),
+              patch("linux_theming.updates.save_preferences", side_effect=OSError("read-only file system"))):
+            QMetaObject.invokeMethod(self.window.findChild(QObject, "installUpdate"), "clicked")
+            QTest.qWait(50)
+            toggle = self.window.findChild(QObject, "automaticUpdates")
+            QMetaObject.invokeMethod(toggle, "toggle")
+            QMetaObject.invokeMethod(toggle, "toggled")
+            self.app.processEvents()
+            self.assertEqual(self.update["status"], "working")
+            self.assertTrue(self.visible("updateProgress"))
+            self.assertTrue(self.enabled("cancelUpdate"))
+            self.assertTrue(self.visible("updateSettingError"))
+            self.assertFalse(toggle.property("checked"))  # Shows the saved setting, not the click.
+            release.set()
+            self.settle()
+        self.assertEqual(self.update["status"], "installed")
+
+    def test_keyboard_focus_scrolls_into_view(self):
+        self.window.setProperty("width", 760)
+        self.window.setProperty("height", 600)
+        self.target = dict(self.target, path=str(self.installed) + "/long" * 40)
+        kept = {"version": "8.0.0", "path": "/k", "size": 78_000_000, "sha256": "b" * 64, "saved": ""}
+        with patch("linux_theming.updates.read_previous", return_value=kept):
+            self.available()
+            self.controller.publish_update(mirror="https://mirror.example", settingError="x " * 80)
+            self.settle()
+            content = self.window.property("contentItem")
+            for name in ("automaticUpdates", "switchToKept", "releaseNotes"):
+                item = self.window.findChild(QObject, name)
+                item.forceActiveFocus()
+                self.app.processEvents()
+                top = item.mapToItem(content, 0, 0).y()
+                self.assertGreaterEqual(top, 0, name)
+                self.assertLessEqual(top + item.property("height"), 600, name)
+
+    def test_deleting_the_kept_copy_requires_confirmation(self):
+        kept = {"version": "8.0.0", "path": "/k", "size": 78_000_000, "sha256": "b" * 64, "saved": "",
+                "sizeText": "78 MB"}
+        with patch("linux_theming.updates.read_previous", return_value=kept):
+            self.open()
+            with patch("linux_theming.updates.discard_previous") as discard:
+                self.click("deleteKept")
+                discard.assert_not_called()
+                self.assertTrue(self.visible("confirmDelete"))
+                self.click("confirmDeleteButton")
+            discard.assert_called_once()
+
+    def test_check_again_replaces_an_old_offer(self):
+        self.available()
+        with patch("linux_theming.updates.check", return_value=dict(RELEASE, version="9.1.0")):
+            self.click("checkAgain")
+        self.assertEqual(self.update["version"], "9.1.0")
 
     def test_restart_waits_for_theme_work(self):
         self.available()

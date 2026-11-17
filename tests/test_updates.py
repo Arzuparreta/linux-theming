@@ -510,6 +510,54 @@ class UpdateTests(unittest.TestCase):
                    return_value={"path": None, "kind": "source", "problem": "x"}):
             self.assertIn("source checkout", updates.installation()["problem"])
 
+    def test_links_into_folders_others_can_change_are_refused(self):
+        shared = self.root / "shared"
+        (shared / "alice/Applications").mkdir(parents=True)
+        shared.chmod(0o777)
+        self.addCleanup(shared.chmod, 0o755)
+        direct = self.root / "home/Applications"
+        direct.parent.mkdir()
+        direct.symlink_to(shared / "alice/Applications")
+        self.assertEqual(updates.modifiable_by_others(direct), shared)
+        # A link inside a shared folder on the way, visible in neither the path nor its resolution.
+        (self.root / "real/Apps").mkdir(parents=True)
+        (shared / "hop").symlink_to(self.root / "real")
+        hopping = self.root / "home/Hop"
+        hopping.symlink_to(shared / "hop/Apps")
+        self.assertEqual(os.path.realpath(hopping), str(self.root / "real/Apps"))
+        self.assertEqual(updates.modifiable_by_others(hopping), shared)
+        self.assertIsNone(updates.modifiable_by_others(self.root / "real/Apps"))
+        private = self.root / "home/Private"
+        private.symlink_to(self.root / "real/Apps")  # Links among private folders are fine.
+        self.assertIsNone(updates.modifiable_by_others(private))
+
+    def test_group_write_with_an_extended_acl_is_refused(self):
+        self.apps.chmod(0o775)
+        self.addCleanup(self.apps.chmod, 0o755)
+        with patch("linux_theming.updates._private_group", return_value=True):
+            self.assertIsNone(updates.modifiable_by_others(self.apps))
+            with patch("linux_theming.updates._extended_acl", side_effect=lambda path: Path(path) == self.apps):
+                self.assertEqual(updates.modifiable_by_others(self.apps), self.apps)
+        self.assertFalse(updates._extended_acl(self.apps))
+
+    def test_update_state_others_can_use_is_refused(self):
+        state = updates.directory(self.paths)
+        state.mkdir(parents=True)
+        state.chmod(0o777)
+        with self.assertRaisesRegex(updates.UpdateError, "can be used by other users"):
+            self.install()
+        self.assertIn(b"old", self.installed.read_bytes()[:16])
+        state.chmod(0o700)
+        (state / "previous").mkdir(mode=0o755)
+        with self.assertRaisesRegex(updates.UpdateError, "can be used by other users"):
+            self.install()
+        self.assertIn(b"old", self.installed.read_bytes()[:16])
+
+    def test_install_reports_the_installed_file_identity(self):
+        result = self.install()
+        info = self.installed.stat()
+        self.assertEqual(result["fingerprint"], f"{info.st_dev}:{info.st_ino}:{info.st_mtime_ns}")
+
     def test_child_environment_drops_bundle_state(self):
         env = updates.child_environment({"APPIMAGE": "/a", "APPDIR": "/m", "ARGV0": "x", "OWD": "/",
                                          "_PYI_APPLICATION_HOME_DIR": "/m/app", "PATH": "/usr/bin"})

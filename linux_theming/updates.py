@@ -2,10 +2,11 @@
 
 Nothing here runs unless the person asks, or opted in to one check a day. A check
 reads release metadata only. Installing downloads next to the running AppImage
-and verifies it before anything is replaced: exact size, a SHA-256 published by
-two independent sources (the release's ``.sha256`` file and GitHub's own asset
-digest), the AppImage header, and the new program's ``--version`` run in a
-disposable HOME/XDG. The verified file then replaces the AppImage by rename, so
+and verifies it before anything is replaced: exact size, the SHA-256 in the
+release's ``.sha256`` file (which must agree with GitHub's asset digest when
+GitHub reports one; both come from the same release, so this detects corruption
+and inconsistency, not a compromised publisher), the AppImage header, and the new
+program's ``--version`` run in a disposable HOME/XDG. The verified file then replaces the AppImage by rename, so
 running processes keep their original file. A copy of the replaced version is
 kept for restoration.
 
@@ -120,10 +121,23 @@ def preferences_path(paths):
 
 
 def _private_directory(paths, path):
+    """Create or accept an update-state folder only if no other user can change it.
+
+    Downloads, kept copies and probes are executed from here.
+    """
     changes.safe_parents(path / "entry", paths.state)
     if path.is_symlink():
         raise UpdateError(f"{path} is a symbolic link. Replace it with a regular folder first.")
     changes.private_parents(path)
+    for folder in (directory(paths), path):
+        info = os.lstat(folder)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise UpdateError(f"{folder} can be used by other users or is not your own folder. Nothing was "
+                              f"changed; make it private (chmod 700 '{folder}') and try again.")
+    shared = modifiable_by_others(path)
+    if shared is not None:
+        raise UpdateError(f"{shared} can be changed by other users, so files Linux Theming runs from {path} "
+                          "could be swapped. Nothing was changed.")
     return path
 
 
@@ -414,10 +428,53 @@ def _private_group(gid):
     return members <= {me}
 
 
+def _extended_acl(path):
+    """Whether a POSIX access ACL names users or groups beyond owner, group and other."""
+    try:
+        value = os.getxattr(path, "system.posix_acl_access")
+    except OSError:
+        return False
+    return len(value) > 4 + 3 * 8  # Header plus the three base entries.
+
+
+def _directories_used(folder):
+    """Every folder whose entries decide where ``folder`` resolves, following each link.
+
+    Includes the folders holding intermediate symbolic links, which neither the path
+    as written nor its final resolution shows.
+    """
+    used, current, pending, hops = [Path("/")], Path("/"), list(Path(folder).parts), 0
+    while pending:
+        part = pending.pop(0)
+        if part == "/":
+            current = Path("/")
+            continue
+        if part in ("", "."):
+            continue
+        if part == "..":
+            current = current.parent
+            continue
+        entry = current / part
+        used.append(current)
+        if entry.is_symlink():
+            hops += 1
+            if hops > 40:
+                raise OSError(f"Too many symbolic links in {folder}")
+            pending = list(Path(os.readlink(entry)).parts) + pending
+            continue
+        current = entry
+    used.append(current)
+    return list(dict.fromkeys(used))
+
+
 def modifiable_by_others(folder):
-    """The first folder, from this one up to /, whose entries another user could replace."""
+    """The first folder another user could change in a way that swaps files under ``folder``."""
     me = os.getuid()
-    for candidate in [Path(folder), *Path(folder).parents]:
+    try:
+        candidates = _directories_used(folder)
+    except OSError:
+        return Path(folder)
+    for candidate in candidates:
         try:
             info = os.stat(candidate)
         except OSError:
@@ -426,7 +483,11 @@ def modifiable_by_others(folder):
             return candidate
         if info.st_mode & stat.S_ISVTX:
             continue  # Others cannot rename or remove entries they do not own.
-        if info.st_mode & stat.S_IWOTH or info.st_mode & stat.S_IWGRP and not _private_group(info.st_gid):
+        if info.st_mode & stat.S_IWOTH:
+            return candidate
+        # With an extended ACL the group bits are its mask: some named user or group
+        # may write. Without one, group write matters only for a shared group.
+        if info.st_mode & stat.S_IWGRP and (_extended_acl(candidate) or not _private_group(info.st_gid)):
             return candidate
     return None
 
@@ -755,25 +816,31 @@ def _commit(paths, target, staged, identity, previous, cancelled):
     try:
         if cancelled():  # The last point at which cancelling is honoured.
             raise Cancelled("The update was cancelled. Nothing was replaced.")
-        _replace(target, staged, identity)
+        fingerprint = _replace(target, staged, identity)
     except BaseException:
         _forget_kept(previous)
         raise
     try:
         changes.sync_directory(Path(target["path"]).parent)
     except OSError:
-        return  # Replaced, durability unknown: keep both versions.
+        return fingerprint  # Replaced, durability unknown: keep both versions.
     with contextlib.suppress(OSError):
         _commit_previous(paths, previous)
+    return fingerprint
 
 
 def _replace(target, staged, identity):
-    """Everything up to and including the rename; raises only if nothing was replaced."""
+    """Everything up to and including the rename; raises only if nothing was replaced.
+
+    Returns the installed file's fingerprint (a rename keeps inode and mtime).
+    """
     _unchanged(target)
     mode = stat.S_IMODE(os.stat(target["path"]).st_mode) | stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR
     _same_staged(staged, identity, mode)
+    fingerprint = _fingerprint(staged)
     _unchanged(target)  # As late as possible before the rename.
     os.replace(staged, target["path"])
+    return fingerprint
 
 
 def install(paths, release, target, *, progress=lambda *_: None, cancelled=lambda: False,
@@ -784,6 +851,8 @@ def install(paths, release, target, *, progress=lambda *_: None, cancelled=lambd
     asset = release["asset"]
     with _locked(paths):
         _unchanged(target)
+        if modifiable_by_others(Path(target["path"]).parent) is not None:
+            raise UpdateError(f"The folder of {target['path']} can now be changed by other users. Nothing was changed.")
         _remove_leftovers(target)
         _remove_scratch(paths)
         _require_space(Path(target["path"]).parent, asset["size"])
@@ -812,10 +881,10 @@ def install(paths, release, target, *, progress=lambda *_: None, cancelled=lambd
             progress("keep", 0, target["size"])
             previous = _keep_previous(paths, target, cancelled=cancelled, progress=progress)
             progress("install", 0, 0)
-            _commit(paths, target, staged, identity, previous, cancelled)
+            fingerprint = _commit(paths, target, staged, identity, previous, cancelled)
         finally:
             staged.unlink(missing_ok=True)
-    return {"version": release["version"], "path": target["path"], "previous": previous}
+    return {"version": release["version"], "path": target["path"], "previous": previous, "fingerprint": fingerprint}
 
 
 def restore(paths, target, *, current=__version__, progress=lambda *_: None, cancelled=lambda: False):
@@ -830,6 +899,8 @@ def restore(paths, target, *, current=__version__, progress=lambda *_: None, can
         if not saved:
             raise UpdateError("No intact copy of another version is kept.")
         _unchanged(target)
+        if modifiable_by_others(Path(target["path"]).parent) is not None:
+            raise UpdateError(f"The folder of {target['path']} can now be changed by other users. Nothing was changed.")
         _remove_leftovers(target)
         _remove_scratch(paths)
         _require_space(Path(target["path"]).parent, saved["size"])
@@ -849,10 +920,10 @@ def restore(paths, target, *, current=__version__, progress=lambda *_: None, can
             progress("keep", 0, target["size"])
             previous = _keep_previous(paths, target, cancelled=cancelled, progress=progress)
             progress("install", 0, 0)
-            _commit(paths, target, staged, identity, previous, cancelled)
+            fingerprint = _commit(paths, target, staged, identity, previous, cancelled)
         finally:
             staged.unlink(missing_ok=True)
-    return {"version": saved["version"], "path": target["path"], "previous": previous}
+    return {"version": saved["version"], "path": target["path"], "previous": previous, "fingerprint": fingerprint}
 
 
 def discard_previous(paths):
