@@ -15,7 +15,7 @@ HAS_QT = importlib.util.find_spec("PySide6") is not None
 if HAS_QT:
     os.environ["QT_QPA_PLATFORM"] = "offscreen"
     os.environ["QT_QUICK_BACKEND"] = "software"
-    from PySide6.QtCore import QMetaObject, QObject, QUrl, qInstallMessageHandler
+    from PySide6.QtCore import QMetaObject, QObject, Qt, QUrl, qInstallMessageHandler
     from PySide6.QtGui import QGuiApplication
     from PySide6.QtQml import QQmlApplicationEngine
     from PySide6.QtQuickControls2 import QQuickStyle
@@ -470,6 +470,42 @@ class UpdateDialogTests(unittest.TestCase):
                 top = item.mapToItem(content, 0, 0).y()
                 self.assertGreaterEqual(top, 0, name)
                 self.assertLessEqual(top + item.property("height"), 600, name)
+
+    def test_confirmations_and_paging_stay_within_the_viewport(self):
+        self.window.setProperty("width", 760)
+        self.window.setProperty("height", 600)
+        kept = {"version": "8.0.0", "path": "/k", "size": 78_000_000, "sha256": "b" * 64, "saved": "",
+                "sizeText": "78 MB"}
+        with patch("linux_theming.updates.read_previous", return_value=kept):
+            self.available()
+            content = self.window.property("contentItem")
+            scroll = self.window.findChild(QObject, "updateScroll")
+            for trigger in ("switchToKept", "deleteKept"):
+                dialog = self.window.findChild(QObject, "updateDialog")
+                dialog.setProperty("confirmRestore", False)
+                dialog.setProperty("confirmDelete", False)
+                self.settle()
+                self.click(trigger)
+                QTest.qWait(100)
+                focused = self.window.property("activeFocusItem")
+                self.assertEqual(focused.property("text"), "Cancel")
+                top = scroll.mapToItem(content, 0, 0).y()
+                item_top = focused.mapToItem(content, 0, 0).y()
+                self.assertGreaterEqual(item_top, top, trigger)
+                self.assertLessEqual(item_top + focused.property("height"), top + scroll.property("height"), trigger)
+            dialog.setProperty("confirmDelete", False)
+            self.controller.publish_update(mirror="https://mirror.example", settingError="x " * 80)
+            self.settle()
+            flick = scroll.property("contentItem")
+            self.assertGreater(flick.property("contentHeight"), scroll.property("height"))
+            flick.setProperty("contentY", 0)
+            checksum = self.window.findChild(QObject, "detailSHA-256")
+            checksum.forceActiveFocus()
+            self.app.processEvents()
+            before = flick.property("contentY")
+            QTest.keyClick(self.window, Qt.Key_PageDown)
+            self.app.processEvents()
+            self.assertGreater(flick.property("contentY"), before)
 
     def test_deleting_the_kept_copy_requires_confirmation(self):
         kept = {"version": "8.0.0", "path": "/k", "size": 78_000_000, "sha256": "b" * 64, "saved": "",

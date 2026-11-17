@@ -18,8 +18,16 @@ Sheet {
     readonly property string diskVersion: u.status === "installed" ? u.installed : u.current
     property bool confirmDelete: false
     // Keyboard focus moves to the safe choice of an inline confirmation.
-    onConfirmRestoreChanged: if (confirmRestore) Qt.callLater(() => cancelSwitch.forceActiveFocus(Qt.TabFocusReason))
-    onConfirmDeleteChanged: if (confirmDelete) Qt.callLater(() => cancelDelete.forceActiveFocus(Qt.TabFocusReason))
+    // Revealed again once the layout has placed the newly shown confirmation.
+    function focusSafely(item) {
+        item.forceActiveFocus(Qt.TabFocusReason)
+        revealLater.item = item
+        revealLater.restart()
+    }
+    // Layouts place a confirmation that just appeared on their next polish.
+    Timer { id: revealLater; property Item item; interval: 30; onTriggered: if (item) dialog.reveal(item) }
+    onConfirmRestoreChanged: if (confirmRestore) Qt.callLater(() => focusSafely(cancelSwitch))
+    onConfirmDeleteChanged: if (confirmDelete) Qt.callLater(() => focusSafely(cancelDelete))
     readonly property bool themeBusy: !!controller.viewState.busy
     property bool confirmRestore: false
     signal restartRequested()
@@ -79,6 +87,8 @@ Sheet {
     }
 
     component Detail: RowLayout {
+        // Read-only text fields consume Page Up/Down; hand them to the dialog.
+        signal pageRequested(int direction)
         property string label
         property string value
         property bool mono: false
@@ -99,7 +109,14 @@ Sheet {
             font.pixelSize: parent.mono ? 12 : Theme.body
             font.family: parent.mono ? Theme.mono : "sans-serif"
             textFormat: TextEdit.PlainText
+            objectName: "detail" + parent.label
             activeFocusOnTab: true
+            Keys.onPressed: (event) => {
+                if (event.key === Qt.Key_PageDown || event.key === Qt.Key_PageUp) {
+                    parent.pageRequested(event.key === Qt.Key_PageDown ? 1 : -1)
+                    event.accepted = true
+                }
+            }
             Accessible.role: Accessible.StaticText
             Accessible.name: parent.label + ": " + text
             Rectangle {
@@ -119,6 +136,7 @@ Sheet {
         // Variable content scrolls; the actions below always stay visible.
         ScrollView {
             id: scroll
+            objectName: "updateScroll"
             Layout.fillWidth: true
             Layout.fillHeight: true
             Layout.minimumHeight: 80
@@ -196,9 +214,9 @@ Sheet {
                             }
                             Command { objectName: "releaseNotes"; compact: true; quiet: true; text: "Release notes"; onClicked: Qt.openUrlExternally(u.page) }
                         }
-                        Detail { label: "Replaces"; value: homePath(u.path) + " (" + u.current + ")" }
-                        Detail { label: "Download"; value: u.size + (u.published ? " · published " + u.published : "") }
-                        Detail { label: "SHA-256"; value: u.sha256; mono: true }
+                        Detail { onPageRequested: (direction) => dialog.page(direction); label: "Replaces"; value: homePath(u.path) + " (" + u.current + ")" }
+                        Detail { onPageRequested: (direction) => dialog.page(direction); label: "Download"; value: u.size + (u.published ? " · published " + u.published : "") }
+                        Detail { onPageRequested: (direction) => dialog.page(direction); label: "SHA-256"; value: u.sha256; mono: true }
                         Body {
                             Layout.fillWidth: true
                             font.pixelSize: Theme.caption
