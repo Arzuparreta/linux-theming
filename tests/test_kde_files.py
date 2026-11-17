@@ -66,6 +66,35 @@ def kde_rewrite(text, edits=None):
     return kconfig_write(grouped({**entries(text), **(edits or {})}))
 
 
+# A few of the names KDE's gtkconfig module writes into colors.css
+# (plasma/kde-gtk-config kded/configvalueprovider.cpp).
+KDE_GTK_COLORS = {"theme_bg_color": "#202326", "theme_fg_color": "#fcfcfc",
+                  "theme_selected_bg_color": "#3daee9", "theme_header_background_breeze": "#2a2e32",
+                  "tooltip_background_breeze": "#292c30", "insensitive_borders_breeze": "#3c4045"}
+
+
+def kde_gtkconfig(config, colors):
+    """What KDE Plasma's gtkconfig module does to GTK 3 and GTK 4 at every login.
+
+    A port of addImportStatementsToGtkCssUserFile and modifyColorsCssFile in
+    plasma/kde-gtk-config kded/config_editor/custom_css.cpp (commit 985ce7d7):
+    gtk.css is read, trimmed, gets `@import 'colors.css';` when that statement
+    is missing and is written back; colors.css is replaced with one
+    @define-color line per color, sorted by name like the QMap it comes from.
+    """
+    for version in (3, 4):
+        folder = config / f"gtk-{version}.0"
+        folder.mkdir(parents=True, exist_ok=True)
+        css = folder / "gtk.css"
+        contents = (css.read_bytes() if css.exists() else b"").strip()
+        if b"@import 'colors.css';" not in contents:
+            contents += b"\n@import 'colors.css';"
+        css.unlink(missing_ok=True)
+        css.write_bytes(contents)
+        (folder / "colors.css").write_text("".join(f"@define-color {name} {value};\n"
+                                                   for name, value in sorted(colors.items())))
+
+
 class KdeCase(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="lt-kde-")
@@ -392,6 +421,90 @@ class KConfigTests(KdeCase):
         self.assertEqual(self.kread(profile_path, "Appearance", "ColorScheme"), "Breeze")
         self.assertEqual(self.kread(profile_path, "Appearance", "Font"), "Iosevka,12")
         self.assertEqual(self.kread(config, "MainWindow", "MenuBar"), "Enabled")
+
+
+
+class KdeGtkTests(KdeCase):
+    def gtk_profile(self, **changes_):
+        return dict(copy.deepcopy(self.base), components=["gtk3", "gtk4"],
+                    resolutions={"gtk3": {"replace_colors": True}, "gtk4": {"replace_colors": True}}, **changes_)
+
+    def css(self, version):
+        return self.paths.config / f"gtk-{version}.0/gtk.css"
+
+    def test_gtk_files_written_by_kde_can_be_connected(self):
+        kde_gtkconfig(self.paths.config, KDE_GTK_COLORS)
+        self.assertEqual(self.css(3).read_text(), "\n@import 'colors.css';")
+        for component in ("gtk3", "gtk4"):
+            with self.subTest(component=component):
+                info = self.connection(component)
+                self.assertFalse(info["blocked"], info["issues"])
+                imported = [source for source in info["sources"] if source["path"].endswith("colors.css")]
+                self.assertEqual(len(imported), len(KDE_GTK_COLORS))
+
+    def test_gtk_apply_update_disconnect_while_kde_rewrites_its_files(self):
+        kde_gtkconfig(self.paths.config, KDE_GTK_COLORS)
+        before = {version: self.css(version).read_text() for version in (3, 4)}
+        profile = self.gtk_profile()
+        self.apply(profile)
+        dark = theme.palette(profile)["special"]["background"]
+        for version in (3, 4):
+            text = self.css(version).read_text()
+            self.assertTrue(text.startswith(before[version]))
+            self.assertIn(f"@define-color theme_bg_color {dark};", text)
+            # GTK reads the import first, so the appended palette wins.
+            self.assertLess(text.index("@import 'colors.css';"), text.index("@define-color theme_bg_color"))
+        # The next login: KDE trims gtk.css and writes colors.css from kdeglobals.
+        kde_gtkconfig(self.paths.config, dict(KDE_GTK_COLORS, theme_bg_color=dark))
+        self.assertEqual(self.css(3).read_text(), self.css(3).read_text().strip())
+        light = dict(profile, polarity="light")
+        self.apply(light)
+        bright = theme.palette(light)["special"]["background"]
+        for version in (3, 4):
+            text = self.css(version).read_text()
+            self.assertIn(f"@define-color theme_bg_color {bright};", text)
+            self.assertEqual(text.count("@import 'colors.css';"), 1)
+        kde_gtkconfig(self.paths.config, KDE_GTK_COLORS)
+        undone = self.apply(self.base)
+        for version in (3, 4):
+            self.assertEqual(self.css(version).read_text(), before[version])
+        self.assertFalse(inventory.managed(self.paths, "gtk3"))
+        kde_gtkconfig(self.paths.config, KDE_GTK_COLORS)
+        changes.undo(self.paths, undone["id"])
+        self.assertTrue(inventory.managed(self.paths, "gtk3"))
+        self.assertIn(f"@define-color theme_bg_color {bright};", self.css(4).read_text())
+        kde_gtkconfig(self.paths.config, KDE_GTK_COLORS)
+        self.apply(self.base)
+        for version in (3, 4):
+            self.assertEqual(self.css(version).read_text().strip(), before[version].strip())
+
+    def test_gtk_imports_that_could_hide_the_palette_are_refused(self):
+        cases = {"rules in the imported file": ("@import 'colors.css';", "window { background: red; }\n"),
+                 "another folder": ("@import url('../theme/colors.css');", None),
+                 "remote": ('@import url("https://example.com/x.css");', None),
+                 "computed target": ("@import colors.css;", None)}
+        for case, (css, imported) in cases.items():
+            with self.subTest(case=case):
+                path = self.css(3)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(css)
+                if imported is not None:
+                    (path.parent / "colors.css").write_text(imported)
+                info = self.connection("gtk3")
+                self.assertTrue(info["blocked"])
+                with self.assertRaises(ValueError):
+                    self.apply(dict(self.profile("gtk3")))
+                self.assertEqual(path.read_text(), css)
+                self.assertFalse(self.paths.ownership("gtk3").exists())
+
+    def test_gtk_imported_colors_changed_after_review_are_not_overwritten(self):
+        kde_gtkconfig(self.paths.config, KDE_GTK_COLORS)
+        plan = service.make_plan(self.paths, self.gtk_profile(), which=self.which)
+        colors = self.paths.config / "gtk-3.0/colors.css"
+        colors.write_text(colors.read_text().replace("#202326", "#ffffff"))
+        with self.assertRaisesRegex(ValueError, "changed since review|stale"):
+            service.apply_reviewed(self.paths, plan, which=self.which)
+        self.assertEqual(self.css(3).read_text(), "\n@import 'colors.css';")
 
 
 if __name__ == "__main__":

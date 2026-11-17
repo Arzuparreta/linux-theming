@@ -194,7 +194,14 @@ The INI editor preserves unrelated entries/comments and rejects duplicate keys o
 sections and unsupported syntax, naming the line (KDE files: see
 [KDE configuration files](#kde-configuration-files)). GTK/Wofi/Waybar stylesheet adapters append
 palette defaults without deleting existing layout rules; their imports,
-unbalanced braces and `!important` require manual resolution or export.
+unbalanced braces and `!important` require manual resolution or export. One
+import is accepted for GTK: a stylesheet in the same folder that contains only
+`@define-color` lines. KDE Plasma's `gtkconfig` module adds
+`@import 'colors.css';` to both `gtk.css` files and writes `colors.css` that way
+at every login; the appended palette follows the import, so its definitions win.
+The imported file is shown with the existing colors and is a review dependency;
+it is never written. KDE also trims the whitespace around `gtk.css` when it
+rewrites it, which is not treated as an edit.
 Rofi has a separate Rasi adapter supporting the native theme/import structure. Shell startup files remain
 unevaluated scripts; custom control flow/plugins can override or prevent later
 assignments. These are conventional file adapters, not interpreters for arbitrary
@@ -224,7 +231,9 @@ must match KConfig, Plasma and Konsole files written by KConfig are themed,
 rewritten by KConfig, updated and disconnected, and every color role a current
 Breeze scheme defines must be one Linux Theming sets. The job summary shows
 which upstream files changed since the snapshot. Locally the KConfig tests skip
-when `kreadconfig6` is not installed.
+when `kreadconfig6` is not installed. GTK on KDE is tested with a port of what
+`plasma/kde-gtk-config` (`kded/config_editor/custom_css.cpp`) does to `gtk.css`
+and `colors.css` at every login, run between apply, update, disconnect and undo.
 
 Already installed zsh/fish, Alacritty and i3 parsers are exercised with private
 HOME/XDG and no desktop connection. GLib tests also compile a private GNOME-shaped

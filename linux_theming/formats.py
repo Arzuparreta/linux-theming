@@ -359,12 +359,41 @@ def append(text, rendered):
     return text.rstrip("\n") + ("\n\n" if text.rstrip("\n") else "") + rendered
 
 
-def css(text, rendered):
-    """Preserve existing layout/styles and append scoped color overrides."""
-    # Imports and custom themes may have higher specificity or execute a theme
-    # reset. We do not claim to resolve those without a native CSS parser.
-    if re.search(r"@(?:import|theme)\b", re.sub(r"/\*.*?\*/", "", text, flags=re.S)):
-        raise ValueError("Imported styles/themes require manual resolution or standalone export.")
+IMPORTS_REFUSED = "Imported styles/themes require manual resolution or standalone export."
+CSS_IMPORT = re.compile(r"""@import\s+(?:url\(\s*(?:"([^"\\]*)"|'([^'\\]*)'|([^\s"'()\\]+))\s*\)"""
+                        r"""|"([^"\\]*)"|'([^'\\]*)')\s*;""")
+DEFINE_COLOR = re.compile(r"\s*@define-color\s+[A-Za-z_][\w-]*\s+[^;{}]+;\s*")
+
+
+def css_imports(text):
+    """Literal @import targets, in order; anything else that imports is refused."""
+    clean = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    if re.search(r"@theme\b", clean):
+        raise ValueError(IMPORTS_REFUSED)
+    targets = []
+    for found in re.finditer(r"@import\b", clean):
+        match = CSS_IMPORT.match(clean, found.start())
+        if not match:
+            raise ValueError(IMPORTS_REFUSED)
+        targets.append(next(group for group in match.groups() if group is not None))
+    return targets
+
+
+def css_color_definitions(text):
+    """True when a stylesheet only names colors, like KDE's generated colors.css."""
+    clean = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    return "/*" not in clean and DEFINE_COLOR.sub("", clean).strip() == ""
+
+
+def css(text, rendered, *, imported=None):
+    """Preserve existing layout/styles and append scoped color overrides.
+
+    `imported(target)` says whether an @import can stay: imports and custom
+    themes may have higher specificity or reset a theme, and without a native
+    CSS parser we only accept what the caller has read and verified.
+    """
+    if any(not (imported and imported(target)) for target in css_imports(text)):
+        raise ValueError(IMPORTS_REFUSED)
     clean = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
     if clean.count("{") != clean.count("}") or clean.count("/*"):
         raise ValueError("Unbalanced stylesheet; resolve it before connecting.")

@@ -28,6 +28,16 @@ class LineMergeTests(unittest.TestCase):
         self.assertEqual(merge.lines(base, base + "alias\n", "mine\n"), "mine\nalias\n")
         self.assertEqual(merge.lines(base, "top\n" + base, "mine\n"), "top\nmine\n")
 
+    def test_whitespace_trimmed_around_the_file_is_not_an_edit(self):
+        # KDE trims gtk.css when it rewrites it; restoring what was there is no conflict.
+        original = "\n@import 'colors.css';"
+        base = original + "\n\n/* palette */\nx { color: red; }\n"
+        self.assertEqual(merge.lines(base, base.strip(), original), original)
+        self.assertEqual(merge.lines(base, base.strip(), base.replace("red", "blue")),
+                         base.replace("red", "blue"))
+        # Whitespace someone left in place is theirs, as before.
+        self.assertEqual(merge.lines("a\nb\n", "a\nb\n\n", "A\nb\n"), "A\nb\n\n")
+
     def test_different_insertions_at_one_place_conflict(self):
         with self.assertRaises(merge.Conflict):
             merge.lines("", "\n", "background black\n")

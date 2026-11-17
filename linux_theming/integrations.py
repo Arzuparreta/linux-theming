@@ -95,6 +95,27 @@ def root_for(paths, path):
     return changes.config_root(paths, path)
 
 
+def gtk_imports(path, text):
+    """Snapshots of the stylesheets a GTK gtk.css imports, by import target.
+
+    KDE Plasma's gtkconfig module adds `@import 'colors.css';` to the GTK 3 and
+    GTK 4 gtk.css and writes colors.css next to it with @define-color lines
+    only. The palette is appended after the import, so its definitions win.
+    Other imports could hold rules we cannot rank and are refused.
+    """
+    imports = {}
+    for target in formats.css_imports(text):
+        if "/" in target or ":" in target or target in ("", ".", ".."):
+            raise ValueError(f"{path} imports {target}; only stylesheets in the same folder that define "
+                             "colors can stay. Resolve the import or use theme export.")
+        state = changes.snapshot(path.parent / target)
+        if state["kind"] != "missing" and not formats.css_color_definitions(changes.text_of(state)):
+            raise ValueError(f"{path} imports {path.parent / target}, which contains more than "
+                             "@define-color lines. Resolve the import or use theme export.")
+        imports[target] = state
+    return imports
+
+
 def merger(paths, path):
     """How later edits to a managed file are combined, or None if it must match exactly."""
     from . import inventory
@@ -394,7 +415,8 @@ def transform(paths, component, originals, value):
     elif component == "rofi":
         texts[first] = rofi.transform(paths, paths_list[0], text, colors(value))
     elif component in ("waybar", "wofi", "gtk3", "gtk4"):
-        texts[first] = formats.css(text, rendered)
+        imports = gtk_imports(paths_list[0], text) if component in ("gtk3", "gtk4") else {}
+        texts[first] = formats.css(text, rendered, imported=imports.__contains__)
         if component == "waybar":
             configs = [path for path in paths_list[1:] if originals[str(path)]["kind"] != "missing"]
             if len(configs) > 1:
@@ -520,6 +542,18 @@ def inspect(paths, component):
             report["inputs"].extend(report["dependencies"])
             report["sources"].extend(dependency_report["sources"])
             report["has_existing_colors"] |= bool(dependency_report["sources"])
+        if component in ("gtk3", "gtk4"):
+            # Imported color definitions are read-only review dependencies.
+            original = changes.text_of((originals if record else states)[str(config_paths[0])])
+            report["dependencies"] = []
+            for target, state in gtk_imports(config_paths[0], original).items():
+                name = str(config_paths[0].parent / target)
+                report["dependencies"].append({"path": name, "fingerprint": changes.digest(state)})
+                for line, text in enumerate(changes.text_of(state).splitlines(), 1):
+                    if text.strip():
+                        report["sources"].append(dict(path=name, line=line, directive="imported color",
+                                                      value=text.strip(), kind="color"))
+            report["inputs"].extend(report["dependencies"])
     except (OSError, ValueError, UnicodeError) as exc:
         report["issues"].append(str(exc))
         # The owning program accepts the file; Linux Theming cannot edit it yet.

@@ -35,6 +35,13 @@ def overlap(first, second):
 
 def lines(base, theirs, ours):
     """Merge line edits; insertions at the edge of the other side's change are kept."""
+    # Programs that rewrite a file may trim all whitespace around it, like KDE
+    # does to gtk.css at every login. That edit carries nothing to keep.
+    if theirs.strip() and base.strip():
+        if theirs == theirs.lstrip():
+            theirs = base[:len(base) - len(base.lstrip())] + theirs
+        if theirs == theirs.rstrip():
+            theirs += base[len(base.rstrip()):]
     if theirs in (base, ours):
         return ours
     if ours == base:
