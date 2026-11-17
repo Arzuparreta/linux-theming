@@ -193,15 +193,20 @@ compare-and-set, so another settings writer can still race the final check.
 The INI editor preserves unrelated entries/comments and rejects duplicate keys or
 sections and unsupported syntax, naming the line (KDE files: see
 [KDE configuration files](#kde-configuration-files)). GTK/Wofi/Waybar stylesheet adapters append
-palette defaults without deleting existing layout rules; their imports,
-unbalanced braces and `!important` require manual resolution or export. One
-import is accepted for GTK: a stylesheet in the same folder that contains only
-`@define-color` lines. KDE Plasma's `gtkconfig` module adds
-`@import 'colors.css';` to both `gtk.css` files and writes `colors.css` that way
-at every login; the appended palette follows the import, so its definitions win.
-The imported file is shown with the existing colors and is a review dependency;
-it is never written. KDE also trims the whitespace around `gtk.css` when it
-rewrites it, which is not treated as an edit.
+palette defaults after everything already in the file and remove nothing:
+imports, layout rules and `!important` declarations stay and keep applying.
+Imported stylesheets are read recursively (local paths and `file://`, at most
+32 files, cycles skipped), never written, listed with the existing colors and
+treated as review dependencies. They never block a connection. The connection
+dialog and the first review explain that imported rules with more specific
+selectors, and `!important` declarations, can keep some of their own colors;
+imports that cannot be read (`resource://`, remote or unreadable files) are
+named. Only unbalanced braces block, because they would swallow the appended
+rules. KDE Plasma's `gtkconfig` module adds `@import 'colors.css';` to both
+`gtk.css` files and writes `colors.css` with `@define-color` lines at every
+login; the palette follows that import, so its definitions win. KDE also trims
+the whitespace around `gtk.css` when it rewrites it, which is not treated as an
+edit.
 Rofi has a separate Rasi adapter supporting the native theme/import structure. Shell startup files remain
 unevaluated scripts; custom control flow/plugins can override or prevent later
 assignments. These are conventional file adapters, not interpreters for arbitrary

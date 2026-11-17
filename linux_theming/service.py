@@ -118,6 +118,8 @@ def make_plan(paths, profile, *, which=None):
         if edited:
             warnings.append(f"{component}: keep the changes made outside linux-theming to "
                             + ", ".join(edited) + " since they were themed.")
+        if component not in removed and record is None:
+            warnings.extend(f"{component}: {note}" for note in file_reports[component].get("notes", []))
         if component in removed:
             warnings.append(f"Disconnect {component}: restore its recorded previous appearance settings.")
         elif file_reports[component].get("linked_paths"):

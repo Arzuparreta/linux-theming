@@ -122,6 +122,13 @@ Sheet {
                 }
                 Body {
                     Layout.fillWidth: true
+                    visible: (dialog.info.notes || []).length > 0 && !dialog.info.blocked
+                    text: (dialog.info.notes || []).join(" ")
+                    font.pixelSize: Theme.caption + 1
+                    color: Theme.text
+                }
+                Body {
+                    Layout.fillWidth: true
                     visible: !!dialog.info.capability && !dialog.info.blocked
                     text: dialog.info.capability || ""
                     font.pixelSize: Theme.caption + 1

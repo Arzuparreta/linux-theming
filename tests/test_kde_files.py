@@ -478,24 +478,22 @@ class KdeGtkTests(KdeCase):
         for version in (3, 4):
             self.assertEqual(self.css(version).read_text().strip(), before[version].strip())
 
-    def test_gtk_imports_that_could_hide_the_palette_are_refused(self):
-        cases = {"rules in the imported file": ("@import 'colors.css';", "window { background: red; }\n"),
-                 "another folder": ("@import url('../theme/colors.css');", None),
-                 "remote": ('@import url("https://example.com/x.css");', None),
-                 "computed target": ("@import colors.css;", None)}
-        for case, (css, imported) in cases.items():
-            with self.subTest(case=case):
-                path = self.css(3)
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(css)
-                if imported is not None:
-                    (path.parent / "colors.css").write_text(imported)
-                info = self.connection("gtk3")
-                self.assertTrue(info["blocked"])
-                with self.assertRaises(ValueError):
-                    self.apply(dict(self.profile("gtk3")))
-                self.assertEqual(path.read_text(), css)
-                self.assertFalse(self.paths.ownership("gtk3").exists())
+    def test_kde_import_after_other_rules_and_imports_is_kept(self):
+        # A gtk.css with the user's own import and rules, then KDE's login.
+        path = self.css(3)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("@import 'custom.css';\nwindow { border-radius: 0; }\n")
+        (path.parent / "custom.css").write_text("headerbar { background-color: #101010; }\n")
+        kde_gtkconfig(self.paths.config, KDE_GTK_COLORS)
+        before = path.read_text()
+        info = self.connection("gtk3")
+        self.assertFalse(info["blocked"], info["issues"])
+        self.assertIn("headerbar { background-color: #101010; }", [s["value"] for s in info["sources"]])
+        self.apply(self.profile("gtk3"))
+        self.assertTrue(path.read_text().startswith(before))
+        kde_gtkconfig(self.paths.config, KDE_GTK_COLORS)
+        self.apply(self.base)
+        self.assertEqual(path.read_text().strip(), before.strip())
 
     def test_gtk_imported_colors_changed_after_review_are_not_overwritten(self):
         kde_gtkconfig(self.paths.config, KDE_GTK_COLORS)

@@ -314,8 +314,7 @@ class IntegrationTests(unittest.TestCase):
                  ("foot", "include=theme.ini\n"),
                  ("i3", "include ~/.config/i3/extra.conf\n"),
                  ("hyprland", "source = ~/.config/hypr/extra.conf\n"),
-                 ("waybar", '@import "theme.css";\n'),
-                 ("gtk4", "window { color: red !important; }\n"),
+                 ("gtk3", "window { color: red;\n"),
                  ("polybar", "[colors]\nbackground=#123456\n"))
         for component, text in cases:
             with self.subTest(component=component):
@@ -326,6 +325,53 @@ class IntegrationTests(unittest.TestCase):
                 self.assertEqual(path.read_text(), text)
                 self.assertFalse(self.paths.state.exists())
                 path.unlink()
+
+    def test_stylesheet_imports_and_important_rules_stay_and_are_explained(self):
+        imported = "@define-color accent_color #ff0000;\nheaderbar { background-color: @accent_color; }\n"
+        nested = "label { color: #00ff00 !important; }\n"
+        for component in ("gtk3", "gtk4", "waybar", "wofi"):
+            with self.subTest(component=component), tempfile.TemporaryDirectory(dir=self.root) as private:
+                self.isolate(private)
+                path = self.seed(component)
+                text = ('@import "theme.css";\n@import url("resource:///org/app/x.css");\n'
+                        "button { border-radius: 4px; color: blue !important; }\n")
+                path.write_text(text)
+                (path.parent / "theme.css").write_text(imported + "@import 'nested.css';\n")
+                (path.parent / "nested.css").write_text(nested)
+                with patch("linux_theming.inventory.shutil.which", side_effect=self.which):
+                    info = presentation.connection(self.paths, component)
+                self.assertFalse(info["blocked"], info["issues"])
+                notes = " ".join(info["notes"])
+                self.assertIn("gtk.css imports" if component.startswith("gtk") else "style.css imports", notes)
+                self.assertIn("resource:///org/app/x.css", notes)
+                home = "~/" + str(path.relative_to(self.paths.home).parent)
+                self.assertIn(f"{home}/{path.name}", notes)
+                self.assertIn(f"{home}/nested.css", notes)
+                listed = {(Path(s["path"]).name, s["value"]) for s in info["sources"]}
+                self.assertIn(("theme.css", "headerbar { background-color: @accent_color; }"), listed)
+                self.assertIn(("nested.css", nested.strip()), listed)
+                plan = self.plan(self.profile_for([component]))
+                self.assertTrue(any("imports other stylesheets" in w for w in plan["warnings"]))
+                connected = service.apply_reviewed(self.paths, plan, which=self.which)
+                self.assertTrue(path.read_text().startswith(text))
+                self.assertEqual((path.parent / "theme.css").read_text(), imported + "@import 'nested.css';\n")
+                self.assertEqual((path.parent / "nested.css").read_text(), nested)
+                # Later reviews of the same scope do not repeat the first-connection notes.
+                self.assertFalse(any("imports other" in w for w in self.plan(self.profile_for([component]))["warnings"]))
+                self.undo(connected)
+                self.assertEqual(path.read_text(), text)
+
+    def test_import_cycles_and_missing_imports_do_not_block(self):
+        path = self.seed("gtk3")
+        path.write_text("@import 'a.css';\n@import 'missing.css';\n")
+        (path.parent / "a.css").write_text("@import 'b.css';\n")
+        (path.parent / "b.css").write_text("@import 'a.css';\n@import 'gtk.css';\n")
+        report = integrations.inspect(self.paths, "gtk3")
+        self.assertEqual(report["issues"], [])
+        self.assertEqual(sorted(Path(d["path"]).name for d in report["dependencies"]),
+                         ["a.css", "b.css", "missing.css"])
+        self.apply(self.profile_for(["gtk3"]))
+        self.assertTrue(inventory.managed(self.paths, "gtk3"))
 
     def test_legacy_alacritty_and_nested_links_are_rejected(self):
         path = self.paths.config / "alacritty/alacritty.yaml"

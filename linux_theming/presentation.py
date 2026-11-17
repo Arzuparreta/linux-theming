@@ -81,7 +81,8 @@ def connection(paths, component, *, discovered=None):
             "linked": linked, "target": target,
             "existingColors": bool(report.get("has_existing_colors")) and not item["managed"],
             "issues": list(dict.fromkeys(issues)), "blocked": bool(issues), "explanation": explanation if issues else "",
-            "sources": report.get("sources", []), "capability": item["capability"],
+            "sources": report.get("sources", []), "notes": [note.replace(str(paths.home) + "/", "~/") for note in report.get("notes", [])],
+            "capability": item["capability"],
             "canExport": component not in appearance.COMPONENTS,
             "native": component in appearance.COMPONENTS, "imageOnly": component == "swaybg"}
 

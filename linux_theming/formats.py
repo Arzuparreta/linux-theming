@@ -359,45 +359,33 @@ def append(text, rendered):
     return text.rstrip("\n") + ("\n\n" if text.rstrip("\n") else "") + rendered
 
 
-IMPORTS_REFUSED = "Imported styles/themes require manual resolution or standalone export."
 CSS_IMPORT = re.compile(r"""@import\s+(?:url\(\s*(?:"([^"\\]*)"|'([^'\\]*)'|([^\s"'()\\]+))\s*\)"""
                         r"""|"([^"\\]*)"|'([^'\\]*)')\s*;""")
-DEFINE_COLOR = re.compile(r"\s*@define-color\s+[A-Za-z_][\w-]*\s+[^;{}]+;\s*")
+
+
+def css_without_comments(text):
+    return re.sub(r"/\*.*?\*/", "", text, flags=re.S)
 
 
 def css_imports(text):
-    """Literal @import targets, in order; anything else that imports is refused."""
-    clean = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
-    if re.search(r"@theme\b", clean):
-        raise ValueError(IMPORTS_REFUSED)
+    """@import targets in order; None for an import whose target is not a literal."""
+    clean = css_without_comments(text)
     targets = []
     for found in re.finditer(r"@import\b", clean):
         match = CSS_IMPORT.match(clean, found.start())
-        if not match:
-            raise ValueError(IMPORTS_REFUSED)
-        targets.append(next(group for group in match.groups() if group is not None))
+        targets.append(next(group for group in match.groups() if group is not None) if match else None)
     return targets
 
 
-def css_color_definitions(text):
-    """True when a stylesheet only names colors, like KDE's generated colors.css."""
-    clean = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
-    return "/*" not in clean and DEFINE_COLOR.sub("", clean).strip() == ""
+def css(text, rendered):
+    """Keep every existing rule and import and append the palette after them.
 
-
-def css(text, rendered, *, imported=None):
-    """Preserve existing layout/styles and append scoped color overrides.
-
-    `imported(target)` says whether an @import can stay: imports and custom
-    themes may have higher specificity or reset a theme, and without a native
-    CSS parser we only accept what the caller has read and verified.
+    Nothing existing is removed, so imported or more specific rules keep
+    applying; they can only keep some of their own colors over the palette,
+    which the review explains. A stylesheet whose braces do not balance would
+    swallow the appended rules, so it is refused.
     """
-    if any(not (imported and imported(target)) for target in css_imports(text)):
-        raise ValueError(IMPORTS_REFUSED)
-    clean = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    clean = css_without_comments(text)
     if clean.count("{") != clean.count("}") or clean.count("/*"):
         raise ValueError("Unbalanced stylesheet; resolve it before connecting.")
-    # Important declarations would defeat appended palette rules.
-    if "!important" in clean:
-        raise ValueError("Important stylesheet declarations require manual resolution or export.")
     return append(text, rendered)

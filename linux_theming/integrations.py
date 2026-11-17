@@ -14,6 +14,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import urllib.parse
 from pathlib import Path
 
 from . import activation, applications, autoreload, changes, formats, merge, rofi, structured
@@ -95,25 +96,67 @@ def root_for(paths, path):
     return changes.config_root(paths, path)
 
 
-def gtk_imports(path, text):
-    """Snapshots of the stylesheets a GTK gtk.css imports, by import target.
+CSS_COMPONENTS = ("waybar", "wofi", "gtk3", "gtk4")
+CSS_IMPORT_LIMIT = 32
 
-    KDE Plasma's gtkconfig module adds `@import 'colors.css';` to the GTK 3 and
-    GTK 4 gtk.css and writes colors.css next to it with @define-color lines
-    only. The palette is appended after the import, so its definitions win.
-    Other imports could hold rules we cannot rank and are refused.
+
+def css_import_target(importer, target):
+    """The local file an @import reads, or None for remote and resource URIs."""
+    if target.startswith("file://"):
+        target = urllib.parse.unquote(urllib.parse.urlsplit(target).path)
+    elif re.match(r"[A-Za-z][\w+.-]*:", target):
+        return None
+    return importer.parent / target if target else None
+
+
+def css_imports(path, text):
+    """Read-only review of the stylesheets `path` imports, followed recursively.
+
+    Imports are never changed and never block: the palette is appended after
+    them. Returns their snapshots (review dependencies), the color lines they
+    contain and notes for the review about rules that can keep their colors.
     """
-    imports = {}
-    for target in formats.css_imports(text):
-        if "/" in target or ":" in target or target in ("", ".", ".."):
-            raise ValueError(f"{path} imports {target}; only stylesheets in the same folder that define "
-                             "colors can stay. Resolve the import or use theme export.")
-        state = changes.snapshot(path.parent / target)
-        if state["kind"] != "missing" and not formats.css_color_definitions(changes.text_of(state)):
-            raise ValueError(f"{path} imports {path.parent / target}, which contains more than "
-                             "@define-color lines. Resolve the import or use theme export.")
-        imports[target] = state
-    return imports
+    states, sources, notes, important = {}, [], [], []
+    pending, unread = [(path, text)], []
+    while pending:
+        importer, content = pending.pop(0)
+        if "!important" in formats.css_without_comments(content):
+            important.append(str(importer))
+        for target in formats.css_imports(content):
+            candidate = css_import_target(importer, target) if target is not None else None
+            if candidate is None:
+                unread.append(f"{target or 'a computed address'} (imported by {importer})")
+                continue
+            if str(candidate) in states or candidate == path:
+                continue
+            if len(states) >= CSS_IMPORT_LIMIT:
+                unread.append(f"{candidate} and further imports (more than {CSS_IMPORT_LIMIT} files)")
+                break
+            try:
+                state = changes.snapshot(candidate)
+                imported = changes.text_of(state)
+            except (OSError, ValueError, UnicodeError):
+                unread.append(str(candidate))
+                continue
+            states[str(candidate)] = state
+            if state["kind"] == "missing":
+                continue  # GTK skips a missing import; it holds no colors.
+            pending.append((candidate, imported))
+            for line, value in enumerate(imported.splitlines(), 1):
+                if re.search(r"color|background|@import", value, re.I):
+                    sources.append(dict(path=str(candidate), line=line, directive="imported",
+                                        value=value.strip(), kind="color"))
+    if states or unread:
+        notes.append(f"{path.name} imports other stylesheets. They stay as they are and the palette is "
+                     "added after them; their rules with more specific selectors can keep some of "
+                     "their own colors.")
+    if unread:
+        notes.append("Linux Theming could not read these imports, so their colors are not listed: "
+                     + "; ".join(unread) + ".")
+    if important:
+        notes.append("!important declarations keep their colors over the palette in: "
+                     + ", ".join(important) + ".")
+    return states, sources, notes
 
 
 def merger(paths, path):
@@ -415,8 +458,7 @@ def transform(paths, component, originals, value):
     elif component == "rofi":
         texts[first] = rofi.transform(paths, paths_list[0], text, colors(value))
     elif component in ("waybar", "wofi", "gtk3", "gtk4"):
-        imports = gtk_imports(paths_list[0], text) if component in ("gtk3", "gtk4") else {}
-        texts[first] = formats.css(text, rendered, imported=imports.__contains__)
+        texts[first] = formats.css(text, rendered)
         if component == "waybar":
             configs = [path for path in paths_list[1:] if originals[str(path)]["kind"] != "missing"]
             if len(configs) > 1:
@@ -542,18 +584,15 @@ def inspect(paths, component):
             report["inputs"].extend(report["dependencies"])
             report["sources"].extend(dependency_report["sources"])
             report["has_existing_colors"] |= bool(dependency_report["sources"])
-        if component in ("gtk3", "gtk4"):
-            # Imported color definitions are read-only review dependencies.
+        if component in CSS_COMPONENTS:
+            # Imported stylesheets are read-only review dependencies.
             original = changes.text_of((originals if record else states)[str(config_paths[0])])
-            report["dependencies"] = []
-            for target, state in gtk_imports(config_paths[0], original).items():
-                name = str(config_paths[0].parent / target)
-                report["dependencies"].append({"path": name, "fingerprint": changes.digest(state)})
-                for line, text in enumerate(changes.text_of(state).splitlines(), 1):
-                    if text.strip():
-                        report["sources"].append(dict(path=name, line=line, directive="imported color",
-                                                      value=text.strip(), kind="color"))
+            imported, sources, report["notes"] = css_imports(config_paths[0], original)
+            report["dependencies"] = [{"path": name, "fingerprint": changes.digest(state)}
+                                      for name, state in imported.items()]
             report["inputs"].extend(report["dependencies"])
+            if not record:
+                report["sources"].extend(sources)
     except (OSError, ValueError, UnicodeError) as exc:
         report["issues"].append(str(exc))
         # The owning program accepts the file; Linux Theming cannot edit it yet.
