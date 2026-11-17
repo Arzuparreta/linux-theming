@@ -55,7 +55,7 @@ def lines(base, theirs, ours):
     return "".join(result)
 
 
-def ini(base, theirs, ours, *, root=False, same=None):
+def ini(base, theirs, ours, *, root=False, same=None, kde=False):
     """Merge INI files key by key and apply our changes to the current text."""
     if theirs in (base, ours):
         return ours
@@ -66,7 +66,7 @@ def ini(base, theirs, ours, *, root=False, same=None):
     def equal(left, right):
         return left is right is None or None not in (left, right) and same(left, right)
 
-    old, current, wanted = (formats.ini_entries(text, root=root) for text in (base, theirs, ours))
+    old, current, wanted = (formats.ini_entries(text, root=root, kde=kde) for text in (base, theirs, ours))
     updates = {}
     for key in [*wanted, *(key for key in old if key not in wanted)]:
         before, now, after = old.get(key), current.get(key), wanted.get(key)
@@ -76,6 +76,6 @@ def ini(base, theirs, ours, *, root=False, same=None):
             section, name = key
             raise Conflict(f"the setting {name}" + (f" in [{section}]" if section else ""))
         updates.setdefault(key[0], {})[key[1]] = after
-    removed = set(formats.sections(base)) - set(formats.sections(ours))
-    merged = formats.ini(theirs, updates, root=root, same=same)
-    return formats.drop_empty_sections(merged, removed, root=root)
+    removed = set(formats.sections(base, kde=kde)) - set(formats.sections(ours, kde=kde))
+    merged = formats.ini(theirs, updates, root=root, same=same, kde=kde)
+    return formats.drop_empty_sections(merged, removed, root=root, kde=kde)

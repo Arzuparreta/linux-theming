@@ -27,7 +27,10 @@ def targets(paths, component):
     if component == 'konsole':
         config = paths.config / 'konsolerc'
         changes.safe_parents(config, paths.config)
-        entries = formats.ini_entries(changes.text_of(changes.snapshot(config)))
+        try:
+            entries = formats.ini_entries(changes.text_of(changes.snapshot(config)), kde=True)
+        except formats.LineError as exc:
+            raise exc.at(config) from None
         name = formats.qsettings_value(entries.get(('Desktop Entry', 'DefaultProfile'), ''))
         if not isinstance(name, str) or not re.fullmatch(r'[\w .-]+\.profile', name) or name in ('.profile', '..profile'):
             raise ValueError('Konsole needs an existing default user profile selected in Settings → Manage Profiles first.')
@@ -126,7 +129,10 @@ def transform(paths, component, texts, value, c):
     first, text = names[0], texts[names[0]]
     rendered = render(component, value, c)
     if component == 'konsole':
-        texts[names[1]] = formats.ini(texts[names[1]], {'Appearance': {'ColorScheme': 'LinuxTheming'}})
+        try:
+            texts[names[1]] = formats.ini(texts[names[1]], {'Appearance': {'ColorScheme': 'LinuxTheming'}}, kde=True)
+        except formats.LineError as exc:
+            raise exc.at(names[1]) from None
     elif component == 'vscode':
         # Preserve other color customizations, syntax themes and workspace settings.
         texts[first] = structured.update(text, {('workbench.colorCustomizations', key): color

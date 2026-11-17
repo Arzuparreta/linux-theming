@@ -1031,11 +1031,45 @@ class GuiTests(unittest.TestCase):
         self.assertTrue(self.controller.state["connection"]["blocked"])
         self.assertEqual(self.controller.state["profile"]["components"], [])
         self.assertFalse(self.window.findChild(QObject, "confirmConnection").property("visible"))
+        self.assertFalse(self.control("connectionReport").property("visible"))
         self.click("connectionExport")
         self.assertTrue(self.controller.state["exportText"])
         self.assertFalse(self.paths.profile.exists())
         self.assertEqual((folder / "kitty.conf").read_text(), "font_size 15\n")
         self.assertEqual(self.messages, [])
+
+    def test_valid_kde_file_we_cannot_edit_offers_a_report_and_keeps_files(self):
+        from PySide6.QtCore import Slot
+        from PySide6.QtGui import QDesktopServices
+
+        from linux_theming import presentation
+
+        opened = []
+
+        class Browser(QObject):
+            @Slot(QUrl)
+            def open(self, url):
+                opened.append(url.toString())
+
+        browser = Browser()
+        QDesktopServices.setUrlHandler("https", browser, "open")
+        self.addCleanup(QDesktopServices.unsetUrlHandler, "https")
+        self.paths.config.mkdir(parents=True, exist_ok=True)
+        kdeglobals = self.paths.config / "kdeglobals"
+        kdeglobals.write_text("[Icons]\nTheme=a\n[Icons]\nTheme=b\n")
+        self.window.setProperty("page", 1)
+        self.click("connect-plasma")
+        info = self.controller.state["connection"]
+        self.assertTrue(info["blocked"])
+        self.assertTrue(info["reportable"])
+        self.assertIn("kdeglobals:3", info["explanation"])
+        self.assertFalse(self.window.findChild(QObject, "confirmConnection").property("visible"))
+        self.click("connectionReport")
+        self.assertEqual(len(opened), 1)
+        self.assertTrue(opened[0].startswith(presentation.ISSUES_URL))
+        self.assertEqual(self.controller.state["profile"]["components"], [])
+        self.assertEqual(kdeglobals.read_text(), "[Icons]\nTheme=a\n[Icons]\nTheme=b\n")
+        self.assertFalse(self.paths.profile.exists())
 
     def test_refresh_keeps_pending_palette_and_application_choices(self):
         self.controller.setOption("polarity", "light")

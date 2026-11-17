@@ -69,6 +69,21 @@ ruff check linux_theming tests scripts/install-platform.py
 bash -n install.sh scripts/install-thinkpad.sh
 ```
 
+KDE adapters are also tested against real KDE files (`tests/fixtures/kde`,
+listed with their source commits in `SOURCES.json`) and, when
+`kreadconfig6`/`kwriteconfig6` are installed, against KDE's own KConfig:
+
+```sh
+scripts/fetch-kde-files.py --out /tmp/kde-latest       # download the latest files only
+LINUX_THEMING_KDE_FILES=/tmp/kde-latest LINUX_THEMING_REQUIRE_KCONFIG=1 \
+    python3 -m unittest tests.test_kde_files -v
+scripts/fetch-kde-files.py --update                     # refresh the committed snapshot
+```
+
+To test another KDE file, add it to `tests/fixtures/kde/SOURCES.json` and run
+`--update`. The **KDE files** workflow repeats this with the latest files on
+every push, pull request and weekly.
+
 Tests use disposable HOME/XDG trees. They cover selection, unrelated preferences,
 stale plans and dependency files, later outside edits kept or reported as
 conflicts, legacy-shaped pywal/walltheme includes,

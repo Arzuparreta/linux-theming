@@ -5,66 +5,189 @@ import string
 import tomllib
 
 
-def ini_lines(text, *, root=False):
-    """Yield (line, section, key, value) using the one INI grammar we edit and merge.
+class LineError(ValueError):
+    """A configuration line that stops editing; `line` is its 1-based number."""
 
-    Headers have key None and value None; comments and blank lines have section
-    None. Unsupported syntax and duplicates are rejected rather than guessed.
+    def __init__(self, message, line=None):
+        super().__init__(message)
+        self.line = line
+
+    def at(self, path):
+        """The same error, naming the file it was found in."""
+        where = f"{path}:{self.line}" if self.line else str(path)
+        return type(self)(f"{where}: {self}", self.line)
+
+
+class Unreadable(LineError):
+    """The owning program accepts this file, but Linux Theming cannot edit it yet.
+
+    This is a current limitation of Linux Theming, not a problem with the user's configuration.
     """
-    section = "" if root else None
+
+
+def kde_header(text):
+    """(group, locked) for a KConfig group header, or None when KConfig ignores it.
+
+    Mirrors KConfigIniBackend::parseConfig: `[A][B]` names the nested group
+    B of A and a final `[$i]` locks the group. The name is kept as written
+    between the outer brackets, so `[` + name + `]` writes the same header.
+    """
+    parts, start, locked = [], 1, False
+    while True:
+        end = text.find("]", start)
+        if end < 0:
+            return None
+        part = text[start:end]
+        if part == "$i" and end + 1 == len(text):
+            locked = True
+        else:
+            parts.append(part)
+        if end + 1 < len(text) and text[end + 1] == "[":
+            start = end + 2
+            continue
+        return "][".join(parts), locked
+
+
+def kde_entry(text):
+    """(key, value, locked, problem) for a KConfig entry line.
+
+    Mirrors KConfigIniBackend::parseConfig. Keys may contain spaces; trailing
+    `[$flags]` and one `[locale]` suffix are read from the end of the key. The
+    locale stays part of the key, because `Name[de]` and `Name` are separate
+    entries. A deleted entry (`Key[$d]`, written without `=`) has the value None.
+    """
+    key, equals, value = text.partition("=")
+    key, value = key.strip(), value.strip()
+    if not key:
+        return None, None, False, "the key is empty"
+    flags, locale = "", None
+    while (start := key.rfind("[")) >= 0:
+        end = key.find("]", start)
+        if end < 0:
+            return None, None, False, "a '[' in the key is not closed"
+        inner = key[start + 1:end]
+        if end > start + 1 and inner.startswith("$"):
+            flags += inner[1:]
+        elif locale is not None:
+            return None, None, False, "the key has two language suffixes"
+        else:
+            locale = inner
+        key = key[:start]
+    if not equals and "d" not in flags:
+        return None, None, False, "there is no '='"
+    name = key if locale is None else f"{key}[{locale}]"
+    return name, None if "d" in flags else value, "i" in flags, None
+
+
+def ini_lines(text, *, root=False, kde=False):
+    """Yield (number, line, section, key, value, locked) for the grammar we edit and merge.
+
+    Headers have key None; comments and blank lines have section None. With
+    `kde`, lines are read like KDE Frameworks' KConfig reads them (kdeglobals,
+    konsolerc, Konsole profiles). Unsupported syntax and duplicates are
+    rejected with their line number rather than guessed.
+    """
+    section = "" if root or kde else None
     seen_sections, seen_keys = set(), set()
-    for line in text.splitlines(keepends=True):
+    file_locked = section_locked = False
+    for number, line in enumerate(text.splitlines(keepends=True), 1):
         stripped = line.strip()
-        if not stripped or stripped.startswith(("#", ";")):
-            yield line, None, None, None
+        comment = stripped.startswith("#") if kde else stripped.startswith(("#", ";"))
+        if not stripped or comment:
+            yield number, line, None, None, None, False
             continue
-        match = re.fullmatch(r"\[([^\[\]\r\n]+)\](?:\s*[#;].*)?", stripped)
-        if match:
-            section = match[1]
+        if kde and stripped.startswith("["):
+            header = kde_header(stripped)
+            if header is None:
+                raise LineError(f"{stripped!r} is not a valid KDE group header (no closing ']'). "
+                                "KDE ignores this line too; correct or remove it, then try again.", number)
+            section, locked = header
+            if not section:
+                file_locked |= locked
+            section_locked = locked or file_locked
             if section in seen_sections:
-                raise ValueError(f"Duplicate configuration section [{section}]; resolve it first.")
+                raise Unreadable(f"the group [{section}] appears more than once. KDE combines repeated "
+                                 "groups, but Linux Theming cannot edit them yet.", number)
             seen_sections.add(section)
-            yield line, section, None, None
+            yield number, line, section, None, None, section_locked
             continue
-        match = re.fullmatch(r"([\w./-]+)\s*=\s*(.*)", stripped)
-        if not match or section is None:
-            raise ValueError("Unsupported configuration syntax; export a theme or normalize it first.")
-        if (section, match[1]) in seen_keys:
-            raise ValueError(f"Duplicate configuration key {match[1]}; resolve it first.")
-        seen_keys.add((section, match[1]))
-        yield line, section, match[1], match[2]
+        if not kde:
+            match = re.fullmatch(r"\[([^\[\]\r\n]+)\](?:\s*[#;].*)?", stripped)
+            if match:
+                section = match[1]
+                if section in seen_sections:
+                    raise LineError(f"Duplicate configuration section [{section}]; resolve it first.", number)
+                seen_sections.add(section)
+                yield number, line, section, None, None, False
+                continue
+        if kde:
+            key, value, locked, problem = kde_entry(stripped)
+            if problem:
+                raise LineError(f"{stripped!r} is not a valid KDE setting ({problem}). "
+                                "KDE ignores this line too; correct or remove it, then try again.", number)
+            locked |= section_locked
+        else:
+            match = re.fullmatch(r"([\w./-]+)\s*=\s*(.*)", stripped)
+            if not match or section is None:
+                raise LineError(f"Unsupported configuration syntax on line {number}; export a theme "
+                                "or normalize it first.", number)
+            key, value, locked = match[1], match[2], False
+        if (section, key) in seen_keys:
+            if kde:
+                raise Unreadable(f"the setting {key} appears more than once in [{section}]. KDE uses "
+                                 "the last one, but Linux Theming cannot edit repeated settings yet.", number)
+            raise LineError(f"Duplicate configuration key {key}; resolve it first.", number)
+        seen_keys.add((section, key))
+        yield number, line, section, key, value, locked
 
 
-def ini_entries(text, *, root=False):
-    """Map (section, key) to its raw value."""
-    return {(section, key): value for _, section, key, value in ini_lines(text, root=root)
+def ini_entries(text, *, root=False, kde=False):
+    """Map (section, key) to its raw value; a deleted KDE entry maps to None."""
+    return {(section, key): value for _, _, section, key, value, _ in ini_lines(text, root=root, kde=kde)
             if key is not None}
 
 
-def ini(text, updates, *, root=False, same=None):
+def locked_error(number, section, key=None):
+    what = f"{key} in [{section}]" if key else f"[{section}]" if section else "this file"
+    return LineError(f"{what} is locked with a [$i] marker (usually set by a system administrator). "
+                     "Linux Theming does not change locked KDE settings.", number)
+
+
+def ini(text, updates, *, root=False, same=None, kde=False):
     """Edit named keys without serializing comments or unrelated preferences.
 
     A value of None removes the key. `same(old, new)` keeps an existing line
     whose value already means the same, so a program's own spelling survives.
+    With `kde`, settings KDE marks as locked are never changed.
     """
-    section = "" if root else None
+    section = "" if root or kde else None
     remaining = {name: dict(values) for name, values in updates.items()}
     result = []
+    locks, file_lock = {}, None
 
     def entry(key, value):
         return [] if value is None else [f"{key}={value}\n"]
 
     def finish():
-        for key, value in remaining.pop(section, {}).items():
+        values = remaining.pop(section, {})
+        if any(value is not None for value in values.values()) and locks.get(section):
+            raise locked_error(locks[section], section)
+        for key, value in values.items():
             result.extend(entry(key, value))
 
-    for line, current, key, value in ini_lines(text, root=root):
+    for number, line, current, key, value, locked in ini_lines(text, root=root, kde=kde):
         if current is not None and key is None:
             finish()
             section = current
+            if locked:
+                locks[section] = number
+                if not section:
+                    file_lock = number
         elif key is not None and key in remaining.get(section, {}):
             wanted = remaining[section].pop(key)
             if wanted is None or not (same and same(value, wanted)):
+                if wanted != value and locked:
+                    raise locked_error(number, section, key)
                 result.extend(entry(key, wanted))
                 continue
         result.append(line if line.endswith("\n") else line + "\n")
@@ -72,15 +195,17 @@ def ini(text, updates, *, root=False, same=None):
     for name, values in remaining.items():
         lines = [line for key, value in values.items() for line in entry(key, value)]
         if lines:
+            if file_lock:
+                raise locked_error(file_lock, "")
             result.append((f"\n[{name}]\n" if result else f"[{name}]\n") if name else "")
             result.extend(lines)
     return "".join(result)
 
 
-def drop_empty_sections(text, names, *, root=False):
+def drop_empty_sections(text, names, *, root=False, kde=False):
     """Remove the named sections when nothing but blank lines remain in them."""
     blocks, headers = [[]], [None]
-    for line, section, key, _ in ini_lines(text, root=root):
+    for _, line, section, key, _, _ in ini_lines(text, root=root, kde=kde):
         if section is not None and key is None:
             blocks.append([])
             headers.append(section)
@@ -194,7 +319,10 @@ def qsettings_same(left, right):
     return left == right or qsettings_value(left) == qsettings_value(right)
 
 
-def sections(text):
+def sections(text, *, kde=False):
+    if kde:
+        return [section for _, _, section, key, _, _ in ini_lines(text, kde=True)
+                if section and key is None]
     return re.findall(r"(?m)^\s*\[([^\[\]\r\n]+)\]\s*$", text)
 
 
