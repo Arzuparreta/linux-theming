@@ -92,6 +92,34 @@ class Cancelled(UpdateError):
     pass
 
 
+class Cancellation:
+    """A cancel request and the start of the replacement exclude each other.
+
+    Once ``commit()`` succeeds, ``cancel()`` refuses; once ``cancel()`` succeeds,
+    ``commit()`` refuses. The person is never told "cancelled" for an update that
+    then replaces the AppImage.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._cancelled = self._committed = False
+
+    def __call__(self):
+        return self._cancelled
+
+    def cancel(self):
+        with self._lock:
+            if not self._committed:
+                self._cancelled = True
+            return self._cancelled
+
+    def commit(self):
+        with self._lock:
+            if not self._cancelled:
+                self._committed = True
+            return self._committed
+
+
 @dataclass(frozen=True)
 class Source:
     api: str
@@ -207,6 +235,7 @@ class _Watch:
         self.cancelled = cancelled
         self.deadline = None if seconds is None else time.monotonic() + seconds
         self.sockets, self.reason = [], ""
+        self._lock = threading.Lock()
         self._done = threading.Event()
         self._thread = threading.Thread(target=self._run, name="update-watch", daemon=True)
 
@@ -221,20 +250,39 @@ class _Watch:
         self._done.set()
         self._thread.join()
 
+    @staticmethod
+    def _stop(sock):
+        with contextlib.suppress(OSError):
+            # The plain socket method: SSLSocket.shutdown also drops its TLS state,
+            # which the reading thread may be using.
+            socket.socket.shutdown(sock, socket.SHUT_RDWR)
+
+    def register(self, sock):
+        """Called as soon as a TCP socket exists, before TLS: a late socket is stopped at once."""
+        with self._lock:
+            self.sockets.append(sock)
+            late = bool(self.reason)
+        if late:
+            self._stop(sock)
+        return sock
+
     def _run(self):
+        # Keeps watching until the request ends, so a socket created after the stop
+        # (a redirect, or one still resolving or connecting) is stopped too.
         while not self._done.wait(0.1):
-            if self.cancelled():
-                self.reason = "cancelled"
-            elif self.deadline is not None and time.monotonic() > self.deadline:
-                self.reason = "deadline"
-            else:
-                continue
-            for sock in list(self.sockets):
-                with contextlib.suppress(OSError):
-                    # The plain socket method: SSLSocket.shutdown also drops its TLS
-                    # state, which the reading thread may be using.
-                    socket.socket.shutdown(sock, socket.SHUT_RDWR)
-            return
+            if not self.reason:
+                if self.cancelled():
+                    reason = "cancelled"
+                elif self.deadline is not None and time.monotonic() > self.deadline:
+                    reason = "deadline"
+                else:
+                    continue
+                with self._lock:
+                    self.reason = reason
+            with self._lock:
+                sockets = list(self.sockets)
+            for sock in sockets:
+                self._stop(sock)
 
     def stopped(self, what):
         if self.reason == "cancelled":
@@ -246,11 +294,17 @@ class _Watch:
 
 def _watched(connection):
     class Watched(connection):
-        def connect(self):
-            super().connect()
-            current = getattr(_watching, "current", None)
-            if current is not None:
-                current.sockets.append(self.sock)
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            watch = getattr(_watching, "current", None)
+            if watch is not None:
+                create = self._create_connection
+
+                def watched_connection(*address, **options):
+                    if watch.reason:  # Stopped before connecting: do not start.
+                        raise OSError("The request was stopped before connecting.")
+                    return watch.register(create(*address, **options))
+                self._create_connection = watched_connection
     return Watched
 
 
@@ -301,6 +355,8 @@ def _fetch(transport, url, limit, *, accept, what, cancelled=lambda: False):
     with _Watch(cancelled, METADATA_DEADLINE) as watch:
         try:
             with transport.open(_request(url, accept), timeout=TIMEOUT) as response:
+                if watch.reason:
+                    raise watch.stopped(what)
                 data = b""
                 read = getattr(response, "read1", response.read)
                 while len(data) <= limit:
@@ -728,7 +784,9 @@ def _kept_records(paths):
                 continue
             value = json.loads(record.read_text())
             copy = Path(value["path"])
-            if (parse_version(value["version"]) is not None and copy.parent == folder
+            own = all(info.st_uid == os.getuid() and not info.st_mode & 0o022
+                      for info in (record.lstat(), copy.lstat()))
+            if (own and parse_version(value["version"]) is not None and copy.parent == folder
                     and copy.with_suffix(".json") == record and not copy.is_symlink() and copy.is_file()
                     and copy.stat().st_size == value["size"] and re.fullmatch(r"[0-9a-f]{64}", value["sha256"])):
                 records.append({key: value[key] for key in ("version", "path", "size", "sha256", "saved")})
@@ -814,7 +872,10 @@ def _commit(paths, target, staged, identity, previous, cancelled):
     unsynchronised replacement still has a way back to either version.
     """
     try:
-        if cancelled():  # The last point at which cancelling is honoured.
+        # The last point at which cancelling is honoured. With a Cancellation, a
+        # cancel request and this transition cannot cross.
+        begin = getattr(cancelled, "commit", None)
+        if not begin() if begin is not None else cancelled():
             raise Cancelled("The update was cancelled. Nothing was replaced.")
         fingerprint = _replace(target, staged, identity)
     except BaseException:
@@ -866,6 +927,8 @@ def install(paths, release, target, *, progress=lambda *_: None, cancelled=lambd
                 except (OSError, http.client.HTTPException) as exc:
                     raise (watch.stopped("AppImage") or _explain(exc, "AppImage")) from exc
                 with response:
+                    if watch.reason:
+                        raise watch.stopped("AppImage")
                     declared = response.headers.get("Content-Length")
                     if declared is not None and declared.strip() != str(asset["size"]):
                         raise UpdateError("The download size differs from the release. Nothing was replaced.")
@@ -896,6 +959,8 @@ def restore(paths, target, *, current=__version__, expected=None, progress=lambd
     if target.get("problem") or not target.get("path"):
         raise UpdateError(target.get("problem") or "This copy cannot be replaced.")
     with _locked(paths):
+        # Validated before any kept file is read or run.
+        _private_directory(paths, directory(paths) / "previous")
         saved = read_previous(paths, current)
         if not saved:
             raise UpdateError("No intact copy of another version is kept.")
@@ -930,9 +995,12 @@ def restore(paths, target, *, current=__version__, expected=None, progress=lambd
     return {"version": saved["version"], "path": target["path"], "previous": previous, "fingerprint": fingerprint}
 
 
-def discard_previous(paths):
-    """Delete every kept copy."""
+def discard_previous(paths, *, current=__version__, expected=None):
+    """Delete every kept copy; with ``expected``, only if the one offered is still that copy."""
     with _locked(paths):
+        saved = read_previous(paths, current)
+        if expected is not None and any(saved.get(key) != expected.get(key) for key in ("version", "path", "sha256")):
+            raise UpdateError("The kept copy changed after you reviewed it. Nothing was deleted; review it again.")
         folder = directory(paths) / "previous"
         if folder.is_dir() and not folder.is_symlink():
             for other in folder.iterdir():

@@ -328,6 +328,27 @@ class UpdateDialogTests(unittest.TestCase):
         self.assertEqual(self.update["status"], "available")
         self.assertFalse(self.update["cancelling"])
 
+    def test_cancel_is_not_acknowledged_once_replacing_began(self):
+        self.available()
+        replacing = threading.Event()
+        finish = threading.Event()
+
+        def install(paths, release, target, *, progress, cancelled):
+            progress("keep", 1, 2)  # The last progress message the window has seen.
+            self.assertTrue(cancelled.commit())
+            replacing.set()
+            finish.wait(5)
+            return {"version": "9.0.0", "path": "", "previous": {}, "fingerprint": "1:2:3"}
+        with patch("linux_theming.updates.install", side_effect=install):
+            QMetaObject.invokeMethod(self.window.findChild(QObject, "installUpdate"), "clicked")
+            self.assertTrue(replacing.wait(5))
+            self.app.processEvents()
+            self.controller.cancelUpdate()
+            self.assertFalse(self.update["cancelling"])
+            finish.set()
+            self.settle()
+        self.assertEqual(self.update["status"], "installed")
+
     def test_opening_during_an_automatic_check_shows_the_destination(self):
         updates.save_preferences(self.paths, automatic=True)
         answer = threading.Event()

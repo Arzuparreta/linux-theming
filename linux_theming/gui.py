@@ -4,7 +4,6 @@ import copy
 import os
 import random
 import sys
-import threading
 from pathlib import Path
 
 import shiboken6
@@ -67,7 +66,7 @@ class UpdateWork(QRunnable):
         super().__init__()
         self.operation = operation
         self.signals = UpdateSignals()
-        self.cancel = threading.Event()
+        self.cancel = updates.Cancellation()
         self._reported = None
 
     def report(self, phase, done, total):
@@ -448,7 +447,7 @@ class Controller(QObject):
                                 mirror=result.get("mirror", ""), path=target["path"], problem=target["problem"],
                                 error="", **with_stamp)
         # Cancelled by shutdown: a stalled server never holds the application open.
-        self.run_update(lambda work: updates.check(cancelled=work.cancel.is_set), complete)
+        self.run_update(lambda work: updates.check(cancelled=work.cancel), complete)
 
     @Slot()
     def automaticUpdateCheck(self):
@@ -509,7 +508,7 @@ class Controller(QObject):
         self.publish_update(status="working", operation="install", phase="download", done=0,
                             total=release["asset"]["size"], error="", notice="", cancelling=False)
         self.run_update(lambda work: updates.install(self.paths, release, target, progress=work.report,
-                                                     cancelled=work.cancel.is_set),
+                                                     cancelled=work.cancel),
                         self.finish_update(False))
 
     @Slot()
@@ -534,7 +533,7 @@ class Controller(QObject):
                             error="", notice="", cancelling=False, keptError="")
         expected = dict(reviewed)
         self.run_update(lambda work: updates.restore(self.paths, target, current=current, expected=expected,
-                                                     progress=work.report, cancelled=work.cancel.is_set),
+                                                     progress=work.report, cancelled=work.cancel),
                         self.finish_update(True))
 
     @Slot()
@@ -548,8 +547,9 @@ class Controller(QObject):
 
     @Slot()
     def cancelUpdate(self):
-        if self._update_work is not None and self._state["update"]["phase"] != "install":
-            self._update_work.cancel.set()
+        # Accepted only before the replacement begins, decided with the worker, not
+        # from progress messages that may still be queued.
+        if self._update_work is not None and self._update_work.cancel.cancel():
             self.publish_update(cancelling=True)
 
     @Slot()
@@ -561,7 +561,8 @@ class Controller(QObject):
             # Its own message: the update status, its retry and a pending restart stay as they were.
             self.publish_update(previous=self.previous_update(), keptError=f"The kept copy was not deleted: {error}"
                                 if error else "", notice="" if error else "The kept copy was deleted.")
-        self.run_update(lambda work: updates.discard_previous(self.paths), complete)
+        reviewed, current = dict(self._state["update"]["previous"]), self.disk_version()
+        self.run_update(lambda work: updates.discard_previous(self.paths, current=current, expected=reviewed), complete)
 
     @Slot(bool)
     def setAutomaticUpdates(self, enabled):
@@ -1097,7 +1098,7 @@ class Controller(QObject):
             self.watcher = None
         self.invalidate_preview()
         if self._update_work is not None:
-            self._update_work.cancel.set()
+            self._update_work.cancel.cancel()  # Refused only once the replacement has begun.
         self.pool.waitForDone()
         self.preview_pool.waitForDone()
         self.read_pool.waitForDone()

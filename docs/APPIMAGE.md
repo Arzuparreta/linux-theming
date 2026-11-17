@@ -208,9 +208,12 @@ SHA-256 first. The engine (`linux_theming/updates.py`) then:
    replaced since the check is never overwritten; reopening the dialog after such
    a change, or a refused install, withdraws the offer until the next check.
 
-**Cancel** is honoured until the rename starts and takes effect within about half
-a second: an open connection is shut down, even mid-read, and a verification probe
-is stopped with every process in its group (escalating to SIGKILL). Release
+**Cancel** is honoured until the replacement begins; from then on it is refused, so
+"Cancelling…" is never shown for an update that completes. Network waits stop within
+about half a second: each connection is shut down, even mid-read, including one
+still connecting. Name resolution itself cannot be interrupted and is bounded by
+the system resolver. A verification probe is stopped with every process in its
+group, escalating to SIGKILL, which can take up to 10 seconds. Release
 information must arrive within 60 seconds, and a download slower than about
 1 KB/s for a whole minute stops with an explanation, so a stalled server can never
 keep the application from closing. If the rename succeeded but could not be
@@ -235,8 +238,8 @@ installed by an administrator or package manager), or when another user could
 change any folder that decides where it resolves: its folder, every folder above
 it, and folders holding symbolic links on the way (writable by others, by a shared
 group, or by users named in an ACL, without the sticky bit). The update state
-folder must be private to you as well, because downloads and kept copies are run
-from there. It is also not updated when the file was replaced outside the running
+folder, its `previous/` folder and every kept copy must be private to you as well,
+because kept copies are run from there; this is checked before any is read or run. It is also not updated when the file was replaced outside the running
 window, because the version it contains is then unknown; restart first. Nothing runs as root.
 
 The SHA-256 checks protect against corrupted or truncated downloads and against

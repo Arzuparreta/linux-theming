@@ -5,6 +5,7 @@ import hashlib
 import http.server
 import json
 import os
+import socket
 import ssl
 import stat
 import subprocess
@@ -46,6 +47,7 @@ class Release(http.server.ThreadingHTTPServer):
         self.length = None
         self.slow = False
         self.crawl = False
+        self.crawl_headers = False
         self.status = 200
         self.headers = {}
         self.requests = []
@@ -76,6 +78,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         server = self.server
         server.requests.append(self.path)
         tag = "v" + server.version
+        if server.crawl_headers:  # Headers one byte at a time; never reaches the socket timeout.
+            with contextlib.suppress(OSError):
+                for byte in b"HTTP/1.0 200 OK\r\nX-Slow: " + b"x" * 400:
+                    self.wfile.write(bytes([byte]))
+                    self.wfile.flush()
+                    time.sleep(0.05)
+            return
         if server.status != 200:
             self.send_response(server.status)
             for key, value in server.headers.items():
@@ -267,6 +276,47 @@ class UpdateTests(unittest.TestCase):
             updates.check(current="8.0.0", machine="x86_64", environ=self.environ,
                           cancelled=lambda: time.monotonic() - started > 0.3)
         self.assertLess(time.monotonic() - started, 5)
+
+    def test_cancelling_while_still_connecting_stops_the_later_socket(self):
+        self.server.crawl_headers = True
+        real = socket.create_connection
+
+        def slow_resolution(*args, **options):
+            time.sleep(0.4)  # Cancelled meanwhile; the socket appears only afterwards.
+            return real(*args, **options)
+        started = time.monotonic()
+        with (patch("socket.create_connection", side_effect=slow_resolution),
+              self.assertRaises(updates.Cancelled)):
+            updates.check(current="8.0.0", machine="x86_64", environ=self.environ,
+                          cancelled=lambda: time.monotonic() - started > 0.15)
+        self.assertLess(time.monotonic() - started, 3)
+        started = time.monotonic()
+        with (patch.object(updates, "METADATA_DEADLINE", 0.2),
+              patch("socket.create_connection", side_effect=slow_resolution),
+              self.assertRaisesRegex(updates.UpdateError, "in time")):
+            self.check()
+        self.assertLess(time.monotonic() - started, 3)
+
+    def test_cancel_and_commit_exclude_each_other(self):
+        cancellation = updates.Cancellation()
+        self.assertTrue(cancellation.commit())
+        self.assertFalse(cancellation.cancel())
+        self.assertFalse(cancellation())
+        cancellation = updates.Cancellation()
+        self.assertTrue(cancellation.cancel())
+        self.assertFalse(cancellation.commit())
+        # A cancel arriving once the replacement began is refused, and the install completes.
+        cancellation = updates.Cancellation()
+        real = updates._replace
+        answers = []
+
+        def replace(*args):
+            answers.append(cancellation.cancel())
+            return real(*args)
+        with patch("linux_theming.updates._replace", side_effect=replace):
+            self.install(cancelled=cancellation)
+        self.assertEqual(answers, [False])
+        self.assertEqual(self.installed.read_bytes(), self.server.body)
 
     def test_check_rejects_invalid_json(self):
         with (patch.object(Release, "release", lambda _self: "not an object"),
@@ -474,6 +524,30 @@ class UpdateTests(unittest.TestCase):
                         expected=updates.read_previous(self.paths, "9.0.0"))
         self.assertIn(b"old", self.installed.read_bytes()[:16])
 
+    def test_restore_validates_kept_copies_before_running_one(self):
+        self.install()
+        folder = updates.directory(self.paths) / "previous"
+        folder.chmod(0o777)
+        updates.program_version.reset_mock()
+        with self.assertRaisesRegex(updates.UpdateError, "can be used by other users"):
+            updates.restore(self.paths, self.target(), current="9.0.0")
+        updates.program_version.assert_not_called()
+        folder.chmod(0o700)
+        record = next(folder.glob("*.json"))
+        record.chmod(0o666)  # Writable by others: never offered.
+        self.assertEqual(updates.read_previous(self.paths, "9.0.0"), {})
+        record.chmod(0o600)
+        self.assertEqual(updates.read_previous(self.paths, "9.0.0")["version"], "8.0.0")
+
+    def test_discard_only_the_reviewed_copy(self):
+        self.install()
+        kept = updates.read_previous(self.paths, "9.0.0")
+        with self.assertRaisesRegex(updates.UpdateError, "Nothing was deleted"):
+            updates.discard_previous(self.paths, current="9.0.0", expected=dict(kept, sha256="0" * 64))
+        self.assertTrue(Path(kept["path"]).exists())
+        updates.discard_previous(self.paths, current="9.0.0", expected=kept)
+        self.assertFalse(Path(kept["path"]).exists())
+
     def test_restore_rejects_a_changed_kept_copy(self):
         self.install()
         kept = Path(updates.read_previous(self.paths)["path"])
@@ -603,7 +677,7 @@ class UpdateTests(unittest.TestCase):
                 started = time.monotonic()
                 with self.assertRaisesRegex(updates.UpdateError, error):
                     self.real_program_version(script, scratch=self.root, **options)
-                self.assertLess(time.monotonic() - started, 10)
+                self.assertLess(time.monotonic() - started, 20)
                 child = int(pids.read_text())
                 deadline = time.monotonic() + 5
                 while time.monotonic() < deadline:
