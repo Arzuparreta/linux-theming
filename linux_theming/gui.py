@@ -344,7 +344,7 @@ class Controller(QObject):
                 "path": "", "problem": "", "sourceProblem": problem, "mirror": mirror, "phase": "", "done": 0, "total": 0,
                 "error": "", "notice": "", "automatic": preference["automatic"],
                 "lastCheck": preference["last_check"], "previous": {}, "installed": "", "restored": False,
-                "operation": "", "cancelling": False, "settingError": "", "retry": "check", "keptIn": str(updates.directory(self.paths) / "previous")}
+                "operation": "", "cancelling": False, "settingError": "", "keptError": "", "retry": "check", "keptIn": str(updates.directory(self.paths) / "previous")}
 
     def publish_update(self, **values):
         self.publish(update=dict(self._state["update"], retry=self._update_retry or "check", **values))
@@ -515,19 +515,26 @@ class Controller(QObject):
     @Slot()
     def restorePrevious(self):
         current = self.disk_version()
-        saved = updates.read_previous(self.paths, current)
-        if self._update_work is not None or not saved or self._state["update"]["status"] == "working":
+        reviewed = self._state["update"]["previous"]
+        if self._update_work is not None or not reviewed or self._state["update"]["status"] == "working":
             return
         self._update_target = target = self.current_target()
         if target["problem"]:
-            self.publish_update(status="error", error=target["problem"], problem=target["problem"])
+            # Shown where the dialog explains why this copy cannot change; a pending restart stays.
+            self.publish_update(path=target["path"], problem=target["problem"])
+            return
+        if {key: updates.read_previous(self.paths, current).get(key) for key in ("version", "path", "sha256")} != {
+                key: reviewed.get(key) for key in ("version", "path", "sha256")}:
+            self.publish_update(previous=self.previous_update(),
+                                keptError="The kept copy changed after it was shown. Review it again.")
             return
         self._update_retry = "restore"
         self._restore_from = self._state["update"]["status"]
-        self.publish_update(status="working", operation="restore", phase="download", done=0, total=saved["size"],
-                            error="", notice="", cancelling=False)
-        self.run_update(lambda work: updates.restore(self.paths, target, current=current, progress=work.report,
-                                                     cancelled=work.cancel.is_set),
+        self.publish_update(status="working", operation="restore", phase="download", done=0, total=reviewed["size"],
+                            error="", notice="", cancelling=False, keptError="")
+        expected = dict(reviewed)
+        self.run_update(lambda work: updates.restore(self.paths, target, current=current, expected=expected,
+                                                     progress=work.report, cancelled=work.cancel.is_set),
                         self.finish_update(True))
 
     @Slot()
@@ -551,9 +558,9 @@ class Controller(QObject):
             return
 
         def complete(_result, error):
-            self.publish_update(previous=self.previous_update(), error=error,
-                                status="error" if error else self._state["update"]["status"],
-                                notice="" if error else "The kept copy was deleted.")
+            # Its own message: the update status, its retry and a pending restart stay as they were.
+            self.publish_update(previous=self.previous_update(), keptError=f"The kept copy was not deleted: {error}"
+                                if error else "", notice="" if error else "The kept copy was deleted.")
         self.run_update(lambda work: updates.discard_previous(self.paths), complete)
 
     @Slot(bool)

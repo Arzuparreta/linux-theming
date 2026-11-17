@@ -462,6 +462,59 @@ class UpdateDialogTests(unittest.TestCase):
                 self.click("confirmDeleteButton")
             discard.assert_called_once()
 
+    def test_switch_uses_only_the_kept_copy_that_was_shown(self):
+        shown = {"version": "8.0.1", "path": "/k1", "size": 78_000_000, "sha256": "b" * 64, "saved": ""}
+        rotated = {"version": "7.0.0", "path": "/k2", "size": 78_000_000, "sha256": "c" * 64, "saved": ""}
+        with patch("linux_theming.updates.read_previous", return_value=shown):
+            self.open()
+            self.click("switchToKept")
+            cancel = self.window.findChild(QObject, "confirmSwitch")
+            self.assertTrue(cancel.property("visible"))
+        with (patch("linux_theming.updates.read_previous", return_value=rotated),
+              patch("linux_theming.updates.restore") as restore):
+            self.click("confirmSwitchButton")
+        restore.assert_not_called()
+        self.assertIn("changed after it was shown", self.update["keptError"])
+        self.assertEqual(self.update["previous"]["version"], "7.0.0")  # The new copy, to review again.
+        with patch("linux_theming.updates.read_previous", return_value=rotated), \
+                patch("linux_theming.updates.restore", return_value={"version": "7.0.0", "path": "", "previous": {}}) \
+                as restore:
+            self.click("switchToKept")
+            self.click("confirmSwitchButton")
+        self.assertEqual(restore.call_args.kwargs["expected"]["sha256"], "c" * 64)
+
+    def test_failed_delete_keeps_the_pending_restart_and_retry(self):
+        running = updates.__version__
+        kept = {"version": running, "path": "/k", "size": 78_000_000, "sha256": "b" * 64, "saved": "",
+                "sizeText": "78 MB"}
+        with patch("linux_theming.updates.read_previous",
+                   side_effect=lambda paths, current: kept if current != running else {}):
+            self.available()
+            with patch("linux_theming.updates.install",
+                       return_value={"version": "9.0.0", "path": "", "previous": {}, "fingerprint": "1:2:3"}):
+                self.click("installUpdate")
+            with patch("linux_theming.updates.discard_previous", side_effect=PermissionError("denied")):
+                self.click("deleteKept")
+                self.click("confirmDeleteButton")
+        self.assertEqual(self.update["status"], "installed")
+        self.assertTrue(self.visible("restartUpdate"))
+        self.assertTrue(self.visible("keptError"))
+        self.assertEqual(self.controller._update_retry, "check")
+
+    def test_confirmations_focus_their_cancel_action(self):
+        kept = {"version": "8.0.0", "path": "/k", "size": 78_000_000, "sha256": "b" * 64, "saved": "",
+                "sizeText": "78 MB"}
+        with patch("linux_theming.updates.read_previous", return_value=kept):
+            self.open()
+            for trigger in ("switchToKept", "deleteKept"):
+                self.window.findChild(QObject, "updateDialog").setProperty("confirmRestore", False)
+                self.window.findChild(QObject, "updateDialog").setProperty("confirmDelete", False)
+                self.settle()
+                self.click(trigger)
+                QTest.qWait(50)
+                focused = self.window.property("activeFocusItem")
+                self.assertEqual(focused.property("text"), "Cancel", trigger)
+
     def test_check_again_replaces_an_old_offer(self):
         self.available()
         with patch("linux_theming.updates.check", return_value=dict(RELEASE, version="9.1.0")):

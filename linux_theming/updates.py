@@ -887,10 +887,11 @@ def install(paths, release, target, *, progress=lambda *_: None, cancelled=lambd
     return {"version": release["version"], "path": target["path"], "previous": previous, "fingerprint": fingerprint}
 
 
-def restore(paths, target, *, current=__version__, progress=lambda *_: None, cancelled=lambda: False):
+def restore(paths, target, *, current=__version__, expected=None, progress=lambda *_: None, cancelled=lambda: False):
     """Put the kept copy back. The version it replaces is kept in turn.
 
-    ``current`` is the version installed at the target path now.
+    ``current`` is the version installed at the target path now. ``expected`` is
+    the kept copy the person reviewed; another copy is refused rather than used.
     """
     if target.get("problem") or not target.get("path"):
         raise UpdateError(target.get("problem") or "This copy cannot be replaced.")
@@ -898,6 +899,9 @@ def restore(paths, target, *, current=__version__, progress=lambda *_: None, can
         saved = read_previous(paths, current)
         if not saved:
             raise UpdateError("No intact copy of another version is kept.")
+        if expected is not None and any(saved[key] != expected.get(key) for key in ("version", "path", "sha256")):
+            raise UpdateError("The kept copy changed after you reviewed it, possibly by another Linux Theming "
+                              "window. Nothing was replaced; review it again.")
         _unchanged(target)
         if modifiable_by_others(Path(target["path"]).parent) is not None:
             raise UpdateError(f"The folder of {target['path']} can now be changed by other users. Nothing was changed.")

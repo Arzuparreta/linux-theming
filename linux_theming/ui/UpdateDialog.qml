@@ -17,6 +17,9 @@ Sheet {
     // After an install or switch that awaits a restart, the file holds another version.
     readonly property string diskVersion: u.status === "installed" ? u.installed : u.current
     property bool confirmDelete: false
+    // Keyboard focus moves to the safe choice of an inline confirmation.
+    onConfirmRestoreChanged: if (confirmRestore) Qt.callLater(() => cancelSwitch.forceActiveFocus(Qt.TabFocusReason))
+    onConfirmDeleteChanged: if (confirmDelete) Qt.callLater(() => cancelDelete.forceActiveFocus(Qt.TabFocusReason))
     readonly property bool themeBusy: !!controller.viewState.busy
     property bool confirmRestore: false
     signal restartRequested()
@@ -323,8 +326,15 @@ Sheet {
                     title: "Replace this AppImage with the kept version " + (u.previous.version || "") + "?"
                     body: homePath(u.path) + " is replaced after the kept copy's checksum is checked and it starts once in a temporary profile. "
                           + "The version it replaces is kept in turn, so you can switch again."
-                    Command { compact: true; quiet: true; text: "Cancel"; onClicked: confirmRestore = false }
+                    Command { id: cancelSwitch; compact: true; quiet: true; text: "Cancel"; onClicked: confirmRestore = false }
                     Command { objectName: "confirmSwitchButton"; compact: true; text: "Switch to " + (u.previous.version || ""); enabled: canChange; onClicked: { confirmRestore = false; controller.restorePrevious() } }
+                }
+                Banner {
+                    objectName: "keptError"
+                    Layout.fillWidth: true
+                    visible: !!u.keptError
+                    tone: "warning"
+                    title: u.keptError || ""
                 }
                 Banner {
                     objectName: "confirmDelete"
@@ -334,7 +344,7 @@ Sheet {
                     title: "Delete the kept copy of version " + (u.previous.version || "") + "?"
                     body: "This frees " + (u.previous.sizeText || "") + ". Switching back to " + (u.previous.version || "")
                           + " then requires downloading it again from GitHub Releases."
-                    Command { compact: true; quiet: true; text: "Cancel"; onClicked: confirmDelete = false }
+                    Command { id: cancelDelete; compact: true; quiet: true; text: "Cancel"; onClicked: confirmDelete = false }
                     Command { objectName: "confirmDeleteButton"; compact: true; danger: true; text: "Delete copy"; enabled: canChange; onClicked: { confirmDelete = false; controller.discardPrevious() } }
                 }
 

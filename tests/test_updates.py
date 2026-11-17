@@ -464,6 +464,16 @@ class UpdateTests(unittest.TestCase):
             self.install(cancelled=lambda: time.monotonic() - started > 0.3)
         self.assertLess(time.monotonic() - started, 5)
 
+    def test_restore_uses_only_the_reviewed_kept_copy(self):
+        self.install()
+        reviewed = dict(updates.read_previous(self.paths, "9.0.0"), sha256="0" * 64)  # Rotated meanwhile.
+        with self.assertRaisesRegex(updates.UpdateError, "changed after you reviewed it"):
+            updates.restore(self.paths, self.target(), current="9.0.0", expected=reviewed)
+        self.assertEqual(self.installed.read_bytes(), self.server.body)
+        updates.restore(self.paths, self.target(), current="9.0.0",
+                        expected=updates.read_previous(self.paths, "9.0.0"))
+        self.assertIn(b"old", self.installed.read_bytes()[:16])
+
     def test_restore_rejects_a_changed_kept_copy(self):
         self.install()
         kept = Path(updates.read_previous(self.paths)["path"])

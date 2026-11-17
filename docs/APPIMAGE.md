@@ -222,8 +222,10 @@ mount are released, then starts the new file with the same view. **Switch to
 X.Y.Z…** restores the kept copy through the same verification, keeping the
 replaced version in turn; it is also available before restarting, to undo an
 update that has not been used yet. **Delete copy** removes it. A failed, cancelled or
-interrupted update leaves the AppImage untouched; leftover downloads are removed
-by the next update. Theme profiles, history and menu entries are not changed:
+interrupted update leaves the AppImage untouched when it stops before the rename;
+after the rename the new version is installed and both versions are kept.
+Leftover downloads are removed by the next update. Switching uses the kept copy
+shown in the dialog; if another window replaced it meanwhile, nothing is switched. Theme profiles, history and menu entries are not changed:
 the menu entry keeps working because the path stays the same.
 
 An AppImage is not updated, and the release page is offered instead, when it was
