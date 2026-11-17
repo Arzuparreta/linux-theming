@@ -18,7 +18,7 @@ ApplicationWindow {
         if (page === 1) applicationsLoader.active = true
         if (page === 2) historyLoader.active = true
     }
-    readonly property bool canNavigate: !s.busy && s.loaded && !reviewDialog.visible && !inspector.visible && !exportDialog.visible && !connectionDialog.visible && !accessDialog.visible && !activationDialog.visible && !shortcutsDialog.visible && !moreMenu.visible && !wallpaperPicker.visible && !folderPicker.visible && !exportPicker.visible
+    readonly property bool canNavigate: !s.busy && s.loaded && !reviewDialog.visible && !inspector.visible && !exportDialog.visible && !connectionDialog.visible && !accessDialog.visible && !activationDialog.visible && !shortcutsDialog.visible && !updateDialog.visible && !moreMenu.visible && !wallpaperPicker.visible && !folderPicker.visible && !exportPicker.visible
     onDailyModeChanged: {
         if (dailyMode) page = 0
         if (dailyMode && canNavigate) Qt.callLater(themePage.focusSearch)
@@ -57,7 +57,12 @@ ApplicationWindow {
     palette.mid: Theme.borderStrong
     palette.dark: Theme.border
     palette.light: Theme.hover
-    onClosing: function(close) { if (s.busy) { close.accepted = false; controller.explainBusyClose() } }
+    onClosing: function(close) {
+        if (s.busy) { close.accepted = false; controller.explainBusyClose() }
+        // Never quit halfway through replacing the AppImage; cancel or wait.
+        else if (s.update.status === "working") { close.accepted = false; updateDialog.open() }
+    }
+    function openUpdates() { updateDialog.open() }
 
     function openWallpaperPicker() { if (controller.navigationFolderUrl) wallpaperPicker.currentFolder = controller.navigationFolderUrl; wallpaperPicker.open() }
     function closeWallpaperPicker() { wallpaperPicker.close() }
@@ -242,6 +247,18 @@ ApplicationWindow {
                     onClicked: controller.refresh()
                 }
                 Command {
+                    objectName: "updateIndicator"
+                    visible: (s.update.status === "available" || s.update.status === "installed") && !updateDialog.visible
+                    compact: true
+                    quiet: true
+                    text: s.update.status !== "installed" ? "Update " + s.update.version
+                        : s.update.restored ? "Restart to use " + s.update.installed : "Restart to update"
+                    Accessible.description: s.update.status === "installed"
+                        ? "Linux Theming " + s.update.installed + " is installed; restart to use it"
+                        : "Linux Theming " + s.update.version + " is available. Review the update before anything is downloaded."
+                    onClicked: updateDialog.open()
+                }
+                Command {
                     id: moreButton
                     objectName: "moreActions"
                     quiet: true
@@ -254,6 +271,7 @@ ApplicationWindow {
                         x: moreButton.width - width
                         MenuItem { text: "Export theme file…"; enabled: !s.busy && !!(s.palette || ({})).special; onTriggered: window.openExport() }
                         MenuItem { text: "Menu entry and shortcut…"; enabled: !s.busy; onTriggered: { controller.refreshLauncher(); accessDialog.open() } }
+                        MenuItem { objectName: "checkForUpdates"; text: "Check for updates…"; onTriggered: updateDialog.open() }
                         MenuSeparator {}
                         MenuItem { text: "Keyboard shortcuts    F1"; onTriggered: shortcutsDialog.open() }
                     }
@@ -564,6 +582,14 @@ ApplicationWindow {
             }
             Command { text: "Close"; Layout.alignment: Qt.AlignRight; onClicked: activationDialog.close() }
         }
+    }
+
+    UpdateDialog {
+        id: updateDialog
+        controller: window.controller
+        windowWidth: window.width
+        windowHeight: window.height
+        onRestartRequested: controller.restartAfterUpdate(window.dailyMode)
     }
 
     Sheet {

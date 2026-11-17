@@ -47,6 +47,8 @@ The current checkout provides a Qt Quick / PySide6 GUI over a Python engine for
 read-only inventory, explicit component selection, palette preview, exact change
 plans, application, export, undo and recovery.
 There is no HTTP server, configuration CLI or MCP implementation.
+The only network access is the AppImage update check and download from GitHub
+Releases, which run only when requested or after an explicit opt-in.
 The source launcher and AppImage packaging keep the engine local.
 
 The [identity migration](MIGRATION.md) preserves existing Desktop Theming data

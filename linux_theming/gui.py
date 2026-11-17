@@ -3,6 +3,8 @@
 import copy
 import os
 import random
+import sys
+import threading
 from pathlib import Path
 
 import shiboken6
@@ -30,6 +32,7 @@ from . import (
     presentation,
     service,
     theme,
+    updates,
     wallpaper,
 )
 from .paths import Paths
@@ -52,6 +55,35 @@ class Work(QRunnable):
             self.signals.finished.emit(None, str(exc) or type(exc).__name__)
 
 
+class UpdateSignals(QObject):
+    progress = Signal(str, int, int)
+    finished = Signal(object, str)
+
+
+class UpdateWork(QRunnable):
+    """Network and file work for updates, cancellable between blocks."""
+
+    def __init__(self, operation):
+        super().__init__()
+        self.operation = operation
+        self.signals = UpdateSignals()
+        self.cancel = threading.Event()
+        self._reported = None
+
+    def report(self, phase, done, total):
+        # About one notification per percent, never one per network block.
+        step = (phase, done * 100 // total if total else -1)
+        if step != self._reported:
+            self._reported = step
+            self.signals.progress.emit(phase, done, total)
+
+    def run(self):
+        try:
+            self.signals.finished.emit(self.operation(self), "")
+        except Exception as exc:
+            self.signals.finished.emit(exc, str(exc) or type(exc).__name__)
+
+
 class Controller(QObject):
     changed = Signal()
     overviewChanged = Signal()
@@ -69,6 +101,14 @@ class Controller(QObject):
         self.preview_pool.setMaxThreadCount(1)
         self.read_pool = QThreadPool(self)
         self.read_pool.setMaxThreadCount(2)
+        # Updates never wait for, or block, theme work.
+        self.update_pool = QThreadPool(self)
+        self.update_pool.setMaxThreadCount(1)
+        self._update_work = None
+        self._update_release = None
+        self._update_target = {}
+        self._update_retry = ""
+        self.relaunch_arguments = None
         self._revision = 0
         self._preview_work = None
         self._pending_preview = None
@@ -88,7 +128,8 @@ class Controller(QObject):
                        "launcher": {}, "shortcut": "", "migration": migration.status(self.paths),
                        "overview": {"components": [], "history": [], "session": {"desktop": "Unknown", "type": "unknown"}},
                        "profile": dict(copy.deepcopy(service.DEFAULT_PROFILE), set_wallpaper=True), "palette": {},
-                       "review": {}, "exportText": "", "exportComponent": "", "wallpaperUrl": "", "connection": {}, "problem": {}, "activity": ""}
+                       "review": {}, "exportText": "", "exportComponent": "", "wallpaperUrl": "", "connection": {}, "problem": {}, "activity": "",
+                       "update": self.initial_update()}
         self._review = None
         self._work = None
         self.timer = QTimer(self)
@@ -280,6 +321,204 @@ class Controller(QObject):
         if self.bootstrap():
             self.refresh()
             self.refreshLauncher()
+        # Opt-in only, after the first window is usable, at most once a day.
+        QTimer.singleShot(15000, self.automaticUpdateCheck)
+
+    # --- Updates ---------------------------------------------------------------
+
+    def initial_update(self):
+        try:
+            page, problem = updates.source().page, ""
+        except updates.UpdateError as exc:
+            page, problem = f"https://github.com/{updates.REPOSITORY}/releases", str(exc)
+        preference = updates.preferences(self.paths)
+        return {"status": "idle", "current": updates.__version__, "version": "", "page": page,
+                "releases": page, "published": "", "size": "", "sha256": "", "confirmed": False,
+                "path": "", "problem": "", "sourceProblem": problem, "phase": "", "done": 0, "total": 0,
+                "error": "", "notice": "", "automatic": preference["automatic"],
+                "lastCheck": preference["last_check"], "previous": {}, "installed": "", "restored": False,
+                "operation": "", "retry": "check", "keptIn": str(updates.directory(self.paths) / "previous")}
+
+    def publish_update(self, **values):
+        self.publish(update=dict(self._state["update"], retry=self._update_retry or "check", **values))
+
+    def previous_update(self):
+        saved = updates.read_previous(self.paths)
+        return dict(saved, sizeText=updates.megabytes(saved["size"])) if saved else {}
+
+    def run_update(self, operation, complete):
+        work = UpdateWork(operation)
+        self._update_work = work
+        work.signals.progress.connect(self.updateProgress)
+
+        def finished(result, error):
+            self._update_work = None
+            if not self._closing:
+                complete(result, error)
+        work.signals.finished.connect(finished)
+        self.update_pool.start(work)
+
+    @Slot(str, int, int)
+    def updateProgress(self, phase, done, total):
+        if self._update_work is not None:
+            self.publish_update(phase=phase, done=done, total=total)
+
+    @Slot()
+    def openUpdates(self):
+        """Read where an update would go. Local and instant; nothing is contacted."""
+        if self._update_work is not None:
+            return
+        self._update_target = updates.installation()
+        preference = updates.preferences(self.paths)
+        self.publish_update(path=self._update_target["path"], problem=self._update_target["problem"],
+                            previous=self.previous_update(), automatic=preference["automatic"],
+                            lastCheck=preference["last_check"])
+
+    @Slot()
+    def checkForUpdates(self, automatic=False):
+        state = self._state["update"]
+        if self._update_work is not None or self._closing or state["status"] == "installed" or state["sourceProblem"]:
+            if state["sourceProblem"] and not automatic:
+                self.publish_update(status="error", error=state["sourceProblem"])
+            return
+        self._update_target = updates.installation()
+        self._update_retry = "check"
+        if not automatic:
+            self.publish_update(status="checking", error="", notice="", path=self._update_target["path"],
+                                problem=self._update_target["problem"])
+
+        def complete(result, error):
+            with_stamp = {}
+            try:
+                with_stamp = {"lastCheck": updates.save_preferences(self.paths, last_check=updates.stamp())["last_check"]}
+            except (OSError, ValueError) as exc:
+                print(f"Update check time could not be saved: {exc}", file=sys.stderr)
+            if error:
+                self._update_release = None
+                if automatic:
+                    print(f"Automatic update check failed: {error}", file=sys.stderr)
+                    self.publish_update(**with_stamp)
+                else:
+                    self.publish_update(status="error", error=error, **with_stamp)
+                return
+            available = result["status"] == "available"
+            self._update_release = result if available else None
+            asset = result.get("asset", {})
+            if automatic and not available:
+                self.publish_update(**with_stamp)
+                return
+            self.publish_update(status=result["status"], version=result["version"], page=result["page"],
+                                published=result["published"], size=updates.megabytes(asset["size"]) if asset else "",
+                                sha256=asset.get("sha256", ""), confirmed=asset.get("confirmed", False),
+                                error="", **with_stamp)
+        self.run_update(lambda work: updates.check(), complete)
+
+    @Slot()
+    def automaticUpdateCheck(self):
+        if self._closing or self._update_work is not None:
+            return
+        try:
+            due = updates.due(updates.preferences(self.paths))
+        except (OSError, ValueError):
+            due = False
+        if due:
+            self.checkForUpdates(automatic=True)
+
+    def finish_update(self, restored):
+        def complete(result, error):
+            self._update_target = updates.installation()
+            common = {"phase": "", "previous": self.previous_update(), "path": self._update_target["path"],
+                      "problem": self._update_target["problem"]}
+            if isinstance(result, updates.Cancelled):
+                # A cancelled download leaves the checked release ready to install again.
+                self.publish_update(status="idle" if restored else "available", error="", notice=error, **common)
+            elif error:
+                self.publish_update(status="error", error=error, notice="", **common)
+            else:
+                self.publish_update(status="installed", installed=result["version"], restored=restored,
+                                    error="", notice="", **common)
+        return complete
+
+    @Slot()
+    def installUpdate(self):
+        release, target = self._update_release, self._update_target
+        if (self._update_work is not None or release is None or target.get("problem")
+                or self._state["update"]["status"] not in ("available", "error")):
+            return
+        self._update_retry = "install"
+        self.publish_update(status="working", operation="install", phase="download", done=0,
+                            total=release["asset"]["size"], error="", notice="")
+        self.run_update(lambda work: updates.install(self.paths, release, target, progress=work.report,
+                                                     cancelled=work.cancel.is_set),
+                        self.finish_update(False))
+
+    @Slot()
+    def restorePrevious(self):
+        saved = updates.read_previous(self.paths)
+        if self._update_work is not None or not saved or self._state["update"]["status"] in ("installed", "working"):
+            return
+        self._update_target = target = updates.installation()
+        if target["problem"]:
+            self.publish_update(status="error", error=target["problem"], problem=target["problem"])
+            return
+        self._update_retry = "restore"
+        self.publish_update(status="working", operation="restore", phase="download", done=0, total=saved["size"],
+                            error="", notice="")
+        self.run_update(lambda work: updates.restore(self.paths, target, progress=work.report,
+                                                     cancelled=work.cancel.is_set),
+                        self.finish_update(True))
+
+    @Slot()
+    def retryUpdate(self):
+        if self._update_retry == "install" and self._update_release is not None:
+            self.installUpdate()
+        elif self._update_retry == "restore":
+            self.restorePrevious()
+        else:
+            self.checkForUpdates()
+
+    @Slot()
+    def cancelUpdate(self):
+        if self._update_work is not None:
+            self._update_work.cancel.set()
+
+    @Slot()
+    def discardPrevious(self):
+        if self._update_work is not None or self._state["update"]["status"] == "working":
+            return
+
+        def complete(_result, error):
+            self.publish_update(previous=self.previous_update(), error=error,
+                                status="error" if error else self._state["update"]["status"],
+                                notice="" if error else "The kept copy was deleted.")
+        self.run_update(lambda work: updates.discard_previous(self.paths), complete)
+
+    @Slot(bool)
+    def setAutomaticUpdates(self, enabled):
+        try:
+            preference = updates.save_preferences(self.paths, automatic=bool(enabled))
+        except (OSError, ValueError) as exc:
+            self.publish_update(error=f"The update setting could not be saved: {exc}", status="error")
+            return
+        self.publish_update(automatic=preference["automatic"])
+
+    @Slot(bool)
+    def restartAfterUpdate(self, quick):
+        if self._state["update"]["status"] != "installed" or self._state["busy"]:
+            if self._state["busy"]:
+                self.explainBusyClose()
+            return
+        self.relaunch_arguments = ["--quick" if quick else "--center"]
+        QGuiApplication.quit()
+
+    def relaunch(self):
+        """Called after the event loop and workers have stopped."""
+        if self.relaunch_arguments is None or not self._update_target.get("path"):
+            return
+        try:
+            updates.relaunch(self._update_target, self.relaunch_arguments)
+        except OSError as exc:
+            print(f"Linux Theming was updated but could not be restarted: {exc}. Start it again.", file=sys.stderr)
 
     @Slot()
     def refresh(self, *, background=False):
@@ -786,6 +1025,9 @@ class Controller(QObject):
             shiboken6.delete(self.watcher)
             self.watcher = None
         self.invalidate_preview()
+        if self._update_work is not None:
+            self._update_work.cancel.set()
         self.pool.waitForDone()
         self.preview_pool.waitForDone()
         self.read_pool.waitForDone()
+        self.update_pool.waitForDone()

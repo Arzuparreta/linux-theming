@@ -5,7 +5,7 @@ Pillow, PySide6, Qt libraries/QML modules and platform plugins. It uses the host
 PATH and HOME/XDG directories without a broker or sandbox. Desktop discovery only reads configuration; desktop changes still require review
 and approval in the GUI. Choosing an image or folder saves only navigation state.
 Running an AppImage does not install packages, a second copy or a background
-service. Optional **⋯ → Menu entry and shortcut… → Add to menu…** registers a reviewed, reversible
+service. Updating it is a separate, explicit action: see [Updates](#updates). Optional **⋯ → Menu entry and shortcut… → Add to menu…** registers a reviewed, reversible
 per-user application-menu entry. It starts the existing AppImage at its stable
 path and assigns no keyboard shortcut. [Daily access and repair](GUI.md#application-menu-and-shortcuts)
 describe the explicit workflow. Local and release AppImages use the same HOME/XDG profile and history.
@@ -173,6 +173,67 @@ Upstream references: [AppImage concepts](https://docs.appimage.org/introduction/
 [compatibility practices](https://docs.appimage.org/reference/best-practices.html),
 and [Qt deployment with PyInstaller](https://doc.qt.io/qtforpython-6/deployment/deployment-pyinstaller.html).
 
+## Updates
+
+**⋯ → Check for updates…** compares the running version with the latest stable
+GitHub Release of this repository. Nothing is contacted until **Check now** is
+chosen, or the opt-in **Check for updates when Linux Theming starts** setting is
+on (off by default; at most one check a day, 15 seconds after start). A check
+downloads release metadata and the small `.sha256` file only. Checks send an
+anonymous `User-Agent: linux-theming/<version>` to `api.github.com` and
+`github.com`; no other data is sent. Automatic checks never download or install,
+and their failures are not shown as errors.
+
+**Download and install** shows the file it replaces, the download size and its
+SHA-256 first. The engine (`linux_theming/updates.py`) then:
+
+1. Downloads into a hidden `.LinuxTheming-x86_64.AppImage.*.download` file in
+   the same folder as the AppImage, with the exact size from the release.
+2. Requires the SHA-256 from the release's `.sha256` file to match, and also
+   GitHub's own asset digest when GitHub provides one. The download address is
+   built from the release tag; release metadata cannot redirect it to another
+   host, and redirects to plain HTTP are refused.
+3. Checks the type 2 AppImage header and starts the new program once with
+   `--version` in a temporary HOME/XDG; it must report the release version.
+4. Copies the AppImage being replaced to
+   `$XDG_STATE_HOME/linux-theming/updates/previous/` (private, one version kept),
+   verified the same way, with a checksum record in `previous.json`.
+5. Replaces the AppImage by rename in the same folder. A file changed, moved or
+   replaced since the check is never overwritten.
+
+Running windows keep their original file until they restart. **Restart now** waits
+until this process has exited, so the single-instance endpoint and the AppImage
+mount are released, then starts the new file with the same view. **Switch to
+X.Y.Z…** restores the kept copy through the same verification, keeping the
+replaced version in turn. **Delete copy** removes it. A failed, cancelled or
+interrupted update leaves the AppImage untouched; leftover downloads are removed
+by the next update. Theme profiles, history and menu entries are not changed:
+the menu entry keeps working because the path stays the same.
+
+An AppImage is not updated, and the release page is offered instead, when it was
+not started as an AppImage (source checkouts), is reached through a symbolic link,
+belongs to another user, or is in a folder you cannot write (for example `/opt`
+installed by an administrator or package manager). Nothing runs as root.
+
+The SHA-256 checks protect against corrupted or truncated downloads and against
+metadata pointing elsewhere. They establish the same trust as downloading the
+release manually from GitHub: they do not protect against someone who controls
+this repository's releases. Releases are never replaced (see below).
+Versions before 0.9.0 have no updater; download 0.9.0 or later manually once.
+
+Diagnostics:
+
+```sh
+# Loopback release of this AppImage: check, rejected corrupt download, verified
+# install, kept copy and restore, all in temporary HOME/XDG. --network adds one
+# read-only check against GitHub, which verifies TLS with this computer's certificates.
+TMPDIR="$PWD/build/smoke-tmp" dist/LinuxTheming-x86_64.AppImage --smoke-test-update --network
+```
+
+`LINUX_THEMING_UPDATE_URL` replaces the GitHub source for testing or a mirror
+with the same layout (`/releases/latest`, `/releases/download/vX.Y.Z/<asset>`).
+It must be `https://`, or `http://` on 127.0.0.1, ::1 or localhost.
+
 ## GitHub Releases
 
 The **AppImage** workflow still builds and smoke-tests artifacts on pushes and
@@ -196,6 +257,8 @@ To cut a release:
    asset to verify host graphics initialization.
    Run `--smoke-test-feh` when feh is installed. With feh, xprop and Xvfb available,
    run `--smoke-test-wallpaper` for apply/undo on its own private display.
+   Run `--smoke-test-update --network` to verify the update flow and confirm that
+   GitHub now reports the new tag as the latest release.
 4. Report the public release URL and verification results.
 
 The workflow rejects dispatches from other branches, version mismatches and

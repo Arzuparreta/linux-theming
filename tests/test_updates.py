@@ -1,0 +1,432 @@
+"""AppImage update engine against a private loopback release, in disposable HOME/XDG."""
+
+import contextlib
+import hashlib
+import http.server
+import json
+import os
+import ssl
+import stat
+import subprocess
+import tempfile
+import threading
+import time
+import unittest
+import urllib.request
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from unittest.mock import patch
+
+from linux_theming import updates
+from linux_theming.paths import Paths
+
+NAME = updates.asset_name("x86_64")
+
+
+def appimage_bytes(marker=b"new", size=updates.MIN_SIZE + 4096):
+    head = b"\x7fELF\x02\x01\x01\x00AI\x02"
+    return head + marker + b"\0" * (size - len(head) - len(marker))
+
+
+class Release(http.server.ThreadingHTTPServer):
+    """A GitHub-shaped release. Tests change its fields to model faults."""
+
+    def __init__(self, body, version="9.0.0"):
+        super().__init__(("127.0.0.1", 0), Handler)
+        self.daemon_threads = True
+        self.version = version
+        self.body = body
+        self.served = body
+        self.checksum = hashlib.sha256(body).hexdigest()
+        self.digest = "sha256:" + self.checksum
+        self.checksum_text = None
+        self.extra = {}
+        self.asset_url = None
+        self.length = None
+        self.status = 200
+        self.headers = {}
+        self.requests = []
+        threading.Thread(target=self.serve_forever, daemon=True).start()
+
+    @property
+    def base(self):
+        return f"http://127.0.0.1:{self.server_port}"
+
+    def release(self):
+        tag = "v" + self.version
+        download = f"{self.base}/releases/download/{tag}/"
+        asset = {"name": NAME, "size": len(self.body), "browser_download_url": self.asset_url or download + NAME}
+        if self.digest is not None:
+            asset["digest"] = self.digest
+        value = {"tag_name": tag, "draft": False, "prerelease": False, "published_at": "2026-11-17T10:00:00Z",
+                 "assets": [asset, {"name": NAME + ".sha256", "size": 95,
+                                    "browser_download_url": download + NAME + ".sha256"}]}
+        value.update(self.extra)
+        return value
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *_args):
+        pass
+
+    def do_GET(self):
+        server = self.server
+        server.requests.append(self.path)
+        tag = "v" + server.version
+        if server.status != 200:
+            self.send_response(server.status)
+            for key, value in server.headers.items():
+                self.send_header(key, value)
+            self.end_headers()
+            return
+        if self.path == "/releases/latest":
+            body = json.dumps(server.release()).encode()
+        elif self.path == f"/releases/download/{tag}/{NAME}.sha256":
+            body = (server.checksum_text or f"{server.checksum}  {NAME}\n").encode()
+        elif self.path == f"/releases/download/{tag}/{NAME}":
+            body = server.served
+        else:
+            self.send_error(404)
+            return
+        self.send_response(200)
+        if server.length != "omit":  # Omitted: HTTP/1.0 ends the body by closing.
+            self.send_header("Content-Length", str(server.length if server.length is not None else len(body)))
+        self.end_headers()
+        with contextlib.suppress(OSError):
+            self.wfile.write(body)
+
+
+class UpdateTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="linux-theming-updates-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.paths = Paths(self.root, self.root / "config", self.root / "state")
+        self.apps = self.root / "Applications"
+        self.apps.mkdir()
+        self.installed = self.apps / NAME
+        self.installed.write_bytes(appimage_bytes(b"old"))
+        self.installed.chmod(0o755)
+        self.server = Release(appimage_bytes(b"new"))
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.environ = {updates.SOURCE_VARIABLE: self.server.base}
+        self.versions = {}
+        self.real_program_version = updates.program_version
+        # Running a real AppImage is covered by --smoke-test-update in the bundle.
+        probe = patch("linux_theming.updates.program_version", side_effect=self.fake_version)
+        probe.start()
+        self.addCleanup(probe.stop)
+
+    def fake_version(self, path, **_options):
+        self.assertTrue(os.access(path, os.X_OK), f"{path} would not start")
+        content = Path(path).read_bytes()
+        return "8.0.0" if b"old" in content[11:16] else self.versions.get("new", self.server.version)
+
+    def target(self):
+        info = self.installed.stat()
+        return {"path": str(self.installed), "problem": "", "size": info.st_size,
+                "fingerprint": f"{info.st_dev}:{info.st_ino}:{info.st_mtime_ns}", "extract_and_run": False}
+
+    def check(self, current="8.0.0"):
+        return updates.check(current=current, machine="x86_64", environ=self.environ)
+
+    def install(self, release=None, target=None, **options):
+        return updates.install(self.paths, release or self.check(), target or self.target(),
+                               environ=self.environ, **options)
+
+    def leftovers(self):
+        return sorted(path.name for path in self.apps.iterdir() if path.name != NAME)
+
+    # --- Source and transport ------------------------------------------------------
+
+    def test_source_defaults_to_this_repository_and_restricts_overrides(self):
+        default = updates.source({})
+        self.assertEqual(default.api, "https://api.github.com/repos/Arzuparreta/linux-theming/releases/latest")
+        self.assertEqual(default.downloads, "https://github.com/Arzuparreta/linux-theming/releases/download")
+        self.assertTrue(updates.source({updates.SOURCE_VARIABLE: "http://127.0.0.1:8080/x"}).loopback)
+        self.assertFalse(updates.source({updates.SOURCE_VARIABLE: "https://mirror.example/r"}).loopback)
+        for value in ("http://mirror.example/r", "https://user:pw@mirror.example", "https://mirror.example/r?x=1",
+                      "file:///tmp/release", "ftp://127.0.0.1/"):
+            with self.subTest(value=value), self.assertRaises(updates.UpdateError):
+                updates.source({updates.SOURCE_VARIABLE: value})
+
+    def test_redirects_never_downgrade_to_plain_http(self):
+        secure = updates._Redirects(loopback=False)
+        request = urllib.request.Request("https://github.com/a")
+        with self.assertRaisesRegex(updates.UpdateError, "insecure"):
+            secure.redirect_request(request, None, 302, "Found", {}, "http://objects.example/asset")
+        self.assertIsNotNone(secure.redirect_request(request, None, 302, "Found", {}, "https://objects.example/a"))
+
+    def test_tls_context_verifies_with_a_system_bundle(self):
+        context = updates.tls_context({})
+        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(context.check_hostname)
+        if any(os.path.isfile(path) for path in updates.CA_FILES):
+            self.assertGreater(context.cert_store_stats()["x509_ca"], 0)
+
+    # --- Checking ------------------------------------------------------------------
+
+    def test_check_offers_only_a_newer_stable_release(self):
+        release = self.check()
+        self.assertEqual(release["status"], "available")
+        self.assertEqual(release["version"], "9.0.0")
+        self.assertEqual(release["asset"]["sha256"], self.server.checksum)
+        self.assertTrue(release["asset"]["confirmed"])
+        self.assertEqual(release["page"], self.server.base + "/releases/tag/v9.0.0")
+        for current in ("9.0.0", "9.0.1", "10.0.0"):
+            with self.subTest(current=current):
+                self.assertEqual(self.check(current)["status"], "current")
+        # Equal and older releases never download the checksum file.
+        self.assertEqual(sum(path.endswith(".sha256") for path in self.server.requests), 1)
+
+    def test_check_compares_versions_numerically(self):
+        self.server.version = "0.10.0"
+        self.assertEqual(self.check("0.9.9")["status"], "available")
+        self.assertEqual(self.check("0.10.0")["status"], "current")
+
+    def test_check_rejects_unexpected_release_metadata(self):
+        cases = {
+            "pre-release": lambda s: s.extra.update(prerelease=True),
+            "draft": lambda s: s.extra.update(draft=True),
+            "stable": lambda s: s.extra.update(tag_name="v9.0.0-rc1"),
+            "unexpected address": lambda s: setattr(s, "asset_url", "https://elsewhere.example/" + NAME),
+            "implausible size": lambda s: s.extra.update(assets=[dict(s.release()["assets"][0], size=10),
+                                                                  s.release()["assets"][1]]),
+            "checksum file of": lambda s: setattr(s, "checksum_text", f"{s.checksum}  other.AppImage\n"),
+            "differs": lambda s: setattr(s, "digest", "sha256:" + "0" * 64),
+            "for this computer": lambda s: s.extra.update(assets=[]),
+        }
+        for message, change in cases.items():
+            with self.subTest(message=message):
+                server = Release(appimage_bytes())
+                self.addCleanup(server.server_close)
+                self.addCleanup(server.shutdown)
+                change(server)
+                with self.assertRaisesRegex(updates.UpdateError, message):
+                    updates.check(current="8.0.0", machine="x86_64",
+                                  environ={updates.SOURCE_VARIABLE: server.base})
+
+    def test_check_without_github_digest_relies_on_the_checksum_file(self):
+        self.server.digest = None
+        self.assertFalse(self.check()["asset"]["confirmed"])
+
+    def test_check_explains_rate_limits_and_missing_releases(self):
+        reset = int(time.time()) + 600
+        self.server.status, self.server.headers = 403, {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": str(reset)}
+        with self.assertRaisesRegex(updates.UpdateError, "limit .* Try again after"):
+            self.check()
+        self.server.status, self.server.headers = 404, {}
+        with self.assertRaisesRegex(updates.UpdateError, "no published release information"):
+            self.check()
+
+    def test_check_rejects_invalid_json(self):
+        with (patch.object(Release, "release", lambda _self: "not an object"),
+              self.assertRaisesRegex(updates.UpdateError, "no version tag")):
+            self.check()
+
+    # --- Installing ----------------------------------------------------------------
+
+    def test_install_verifies_replaces_by_rename_and_keeps_the_previous_version(self):
+        with open(self.installed, "rb") as running:  # A running copy keeps its file.
+            progress = []
+            result = self.install(progress=lambda *step: progress.append(step))
+            self.assertIn(b"old", running.read(16))
+        self.assertEqual(self.installed.read_bytes(), self.server.body)
+        self.assertTrue(os.access(self.installed, os.X_OK))
+        self.assertEqual(stat.S_IMODE(self.installed.stat().st_mode), 0o755)
+        self.assertEqual(result["version"], "9.0.0")
+        kept = updates.read_previous(self.paths)
+        self.assertEqual(kept["version"], "8.0.0")
+        self.assertEqual(Path(kept["path"]).read_bytes(), appimage_bytes(b"old"))
+        self.assertEqual(Path(kept["path"]).name, "LinuxTheming-8.0.0-" + updates.platform.machine() + ".AppImage")
+        self.assertEqual([phase for phase, *_ in progress if phase != "download"][:1], ["verify"])
+        self.assertEqual(progress[-1][0], "install")
+        self.assertEqual(self.leftovers(), [])
+        self.assertEqual(stat.S_IMODE(updates.directory(self.paths).stat().st_mode), 0o700)
+
+    def test_rejected_downloads_leave_the_appimage_untouched(self):
+        original = self.installed.read_bytes()
+        cases = {
+            "checksum": lambda s: setattr(s, "served", appimage_bytes(b"bad")),
+            "size differs": lambda s: setattr(s, "length", len(s.body) - 1),
+            # Without a declared length only the byte count can catch it.
+            "larger": lambda s: (setattr(s, "served", s.body + b"x"), setattr(s, "length", "omit")),
+        }
+        for message, change in cases.items():
+            with self.subTest(message=message):
+                release = self.check()
+                self.server.served, self.server.length = self.server.body, None
+                change(self.server)
+                with self.assertRaisesRegex(updates.UpdateError, message):
+                    self.install(release)
+                self.assertEqual(self.installed.read_bytes(), original)
+                self.assertEqual(self.leftovers(), [])
+                self.assertEqual(updates.read_previous(self.paths), {})
+
+    def test_program_that_does_not_report_the_release_version_is_not_installed(self):
+        self.versions["new"] = "9.0.1"
+        with self.assertRaisesRegex(updates.UpdateError, "reports version '9.0.1', not 9.0.0"):
+            self.install()
+        self.assertIn(b"old", self.installed.read_bytes()[:16])
+        self.assertEqual(self.leftovers(), [])
+
+    def test_download_that_is_not_an_appimage_is_not_started(self):
+        body = b"#!/bin/sh\necho 9.0.0\n" + b"\0" * updates.MIN_SIZE
+        self.server.body = self.server.served = body
+        self.server.checksum = hashlib.sha256(body).hexdigest()
+        self.server.digest = "sha256:" + self.server.checksum
+        with self.assertRaisesRegex(updates.UpdateError, "not a type 2 AppImage"):
+            self.install()
+        updates.program_version.assert_not_called()
+        self.assertEqual(self.leftovers(), [])
+
+    def test_appimage_changed_after_the_check_is_not_replaced(self):
+        target = self.target()
+        replacement = self.apps / "manual.AppImage"
+        replacement.write_bytes(appimage_bytes(b"usr"))
+        os.replace(replacement, self.installed)
+        with self.assertRaisesRegex(updates.UpdateError, "changed after this window opened"):
+            self.install(target=target)
+        self.assertIn(b"usr", self.installed.read_bytes()[:16])
+        self.assertNotIn(f"/releases/download/v9.0.0/{NAME}", self.server.requests)
+
+    def test_cancelling_removes_the_partial_download(self):
+        with self.assertRaises(updates.Cancelled):
+            self.install(cancelled=lambda: True)
+        self.assertEqual(self.leftovers(), [])
+        self.assertIn(b"old", self.installed.read_bytes()[:16])
+
+    def test_insufficient_space_is_reported_before_downloading(self):
+        usage = updates.shutil.disk_usage(self.apps)._replace(free=updates.RESERVE)
+        with (patch("linux_theming.updates.shutil.disk_usage", return_value=usage),
+              self.assertRaisesRegex(updates.UpdateError, "needs .* free")):
+            self.install()
+        self.assertNotIn(f"/releases/download/v9.0.0/{NAME}", self.server.requests)
+
+    def test_one_update_at_a_time(self):
+        release = self.check()
+        with (updates._locked(self.paths),
+              self.assertRaisesRegex(updates.UpdateError, "Another Linux Theming window")):
+            self.install(release)
+
+    def test_leftovers_from_an_interrupted_update_are_removed(self):
+        stale = self.apps / f".{NAME}.0123456789ab.download"
+        stale.write_bytes(b"partial")
+        self.install()
+        self.assertEqual(self.leftovers(), [])
+
+    def test_restore_switches_back_and_keeps_the_replaced_version(self):
+        self.install()
+        restored = updates.restore(self.paths, self.target())
+        self.assertEqual(restored["version"], "8.0.0")
+        self.assertIn(b"old", self.installed.read_bytes()[:16])
+        kept = updates.read_previous(self.paths)
+        self.assertEqual(kept["version"], "9.0.0")
+        self.assertEqual(Path(kept["path"]).read_bytes(), self.server.body)
+        self.assertEqual(len(list(Path(kept["path"]).parent.iterdir())), 1)
+        self.assertEqual(self.leftovers(), [])
+
+    def test_restore_rejects_a_changed_kept_copy(self):
+        self.install()
+        kept = Path(updates.read_previous(self.paths)["path"])
+        with open(kept, "r+b") as stream:
+            stream.seek(20)
+            stream.write(b"tampered")
+        with self.assertRaisesRegex(updates.UpdateError, "changed since it was saved"):
+            updates.restore(self.paths, self.target())
+        self.assertEqual(self.installed.read_bytes(), self.server.body)
+
+    def test_discard_previous(self):
+        self.install()
+        kept = Path(updates.read_previous(self.paths)["path"])
+        updates.discard_previous(self.paths)
+        self.assertFalse(kept.exists())
+        self.assertEqual(updates.read_previous(self.paths), {})
+
+    # --- The running copy and child processes --------------------------------------
+
+    def current(self, path):
+        return {"path": str(path), "kind": "appimage", "problem": ""}
+
+    def test_installation_refuses_links_foreign_and_read_only_locations(self):
+        with patch("linux_theming.launcher.current_executable", return_value=self.current(self.installed)):
+            self.assertEqual(updates.installation()["problem"], "")
+            with patch("linux_theming.updates.os.getuid", return_value=os.getuid() + 1):
+                self.assertIn("belongs to another user", updates.installation()["problem"])
+            with patch("linux_theming.updates.os.access", return_value=False):
+                self.assertIn("cannot be written by you", updates.installation()["problem"])
+        link = self.root / "link.AppImage"
+        link.symlink_to(self.installed)
+        with patch("linux_theming.launcher.current_executable", return_value=self.current(link)):
+            self.assertIn("symbolic link", updates.installation()["problem"])
+        with patch("linux_theming.launcher.current_executable",
+                   return_value={"path": None, "kind": "source", "problem": "x"}):
+            self.assertIn("source checkout", updates.installation()["problem"])
+
+    def test_child_environment_drops_bundle_state(self):
+        env = updates.child_environment({"APPIMAGE": "/a", "APPDIR": "/m", "ARGV0": "x", "OWD": "/",
+                                         "_PYI_APPLICATION_HOME_DIR": "/m/app", "PATH": "/usr/bin"})
+        self.assertEqual(env, {"PATH": "/usr/bin", "PYINSTALLER_RESET_ENVIRONMENT": "1"})
+
+    def test_program_version_runs_in_a_disposable_profile(self):
+        script = self.root / "probe"
+        script.write_text('#!/bin/sh\necho "runtime noise" >&2\nprintf "%s %s\\n" "$HOME" "${APPIMAGE-none}" > '
+                          f'"{self.root}/seen"\necho 9.0.0\n')
+        script.chmod(0o700)
+        with patch.dict(os.environ, {"APPIMAGE": "/outer.AppImage"}):
+            self.assertEqual(self.real_program_version(script, scratch=self.root), "9.0.0")
+        home, appimage = (self.root / "seen").read_text().split()
+        self.assertTrue(home.startswith(str(self.root / "probe-")))
+        self.assertEqual(appimage, "none")
+        self.assertFalse(Path(home).exists())
+        script.write_text("#!/bin/sh\necho broken >&2\nexit 3\n")
+        with self.assertRaisesRegex(updates.UpdateError, "did not start on this computer: broken"):
+            self.real_program_version(script, scratch=self.root)
+
+    def test_relaunch_waits_for_this_process_then_starts_the_appimage(self):
+        calls = []
+        updates.relaunch({"path": "/apps/LinuxTheming.AppImage", "extract_and_run": True}, ["--center"],
+                         popen=lambda command, **options: calls.append((command, options)))
+        command, options = calls[0]
+        self.assertEqual(command[:4], ["/bin/sh", "-c", updates.WAIT_THEN_EXEC, "sh"])
+        self.assertEqual(command[4:], ["/apps/LinuxTheming.AppImage", "--appimage-extract-and-run", "--center"])
+        self.assertTrue(options["close_fds"] and options["start_new_session"])
+        self.assertEqual(options["env"]["PYINSTALLER_RESET_ENVIRONMENT"], "1")
+        self.assertNotIn("APPIMAGE", options["env"])
+        writer = updates._relaunch_pipes.pop()
+        self.assertFalse(os.get_inheritable(writer))
+        os.close(writer)
+
+    def test_wait_then_exec_starts_only_after_the_writer_closes(self):
+        marker = self.root / "started"
+        reader, writer = os.pipe()
+        helper = subprocess.Popen(["/bin/sh", "-c", updates.WAIT_THEN_EXEC, "sh",
+                                   "/bin/sh", "-c", f'date > "{marker}"'], stdin=reader, close_fds=True)
+        os.close(reader)
+        time.sleep(0.5)
+        self.assertFalse(marker.exists())
+        self.assertIsNone(helper.poll())
+        os.close(writer)  # What process exit does.
+        self.assertEqual(helper.wait(timeout=20), 0)
+        self.assertTrue(marker.exists())
+
+    # --- Preferences ---------------------------------------------------------------
+
+    def test_preferences_default_to_manual_and_check_once_a_day(self):
+        self.assertEqual(updates.preferences(self.paths), {"automatic": False, "last_check": ""})
+        self.assertFalse(updates.due(updates.preferences(self.paths)))
+        saved = updates.save_preferences(self.paths, automatic=True)
+        self.assertTrue(updates.due(saved))
+        now = datetime.now(timezone.utc)
+        recent = dict(saved, last_check=(now - timedelta(hours=2)).isoformat())
+        self.assertFalse(updates.due(recent, now))
+        self.assertTrue(updates.due(dict(saved, last_check=(now - timedelta(hours=25)).isoformat()), now))
+        self.assertTrue(updates.due(dict(saved, last_check=(now + timedelta(hours=2)).isoformat()), now))
+        self.assertEqual(stat.S_IMODE(updates.preferences_path(self.paths).stat().st_mode), 0o600)
+        updates.preferences_path(self.paths).write_text("[1]")
+        self.assertEqual(updates.preferences(self.paths), {"automatic": False, "last_check": ""})
+
+
+if __name__ == "__main__":
+    unittest.main()
