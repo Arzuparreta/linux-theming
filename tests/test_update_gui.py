@@ -504,6 +504,42 @@ class UpdateDialogTests(unittest.TestCase):
             self.click("confirmSwitchButton")
         self.assertEqual(restore.call_args.kwargs["expected"]["sha256"], "c" * 64)
 
+    def test_retry_never_switches_to_a_copy_that_was_not_confirmed(self):
+        shown = {"version": "8.0.1", "path": "/k1", "size": 78_000_000, "sha256": "b" * 64, "saved": ""}
+        rotated = {"version": "7.0.1", "path": "/k2", "size": 78_000_000, "sha256": "c" * 64, "saved": ""}
+        kept = {"value": shown}
+        with patch("linux_theming.updates.read_previous", side_effect=lambda paths, current: kept["value"]):
+            self.open()
+            self.click("switchToKept")
+
+            def rotate(*_args, **_options):
+                kept["value"] = rotated  # Another window rotated the copy before the worker read it.
+                raise updates.UpdateError("The kept copy changed after you reviewed it.")
+            with patch("linux_theming.updates.restore", side_effect=rotate):
+                self.click("confirmSwitchButton")
+            self.assertEqual(self.update["status"], "error")
+            self.assertEqual(self.update["previous"]["version"], "7.0.1")
+            self.assertFalse(self.visible("retryUpdate"))
+            with patch("linux_theming.updates.restore") as restore:
+                self.controller.retryUpdate()
+                self.settle()
+            restore.assert_not_called()
+
+    def test_deleting_the_copy_withdraws_a_switch_retry(self):
+        kept = {"version": "8.0.0", "path": "/k", "size": 78_000_000, "sha256": "b" * 64, "saved": "",
+                "sizeText": "78 MB"}
+        with patch("linux_theming.updates.read_previous", return_value=kept):
+            self.open()
+            self.click("switchToKept")
+            with patch("linux_theming.updates.restore", side_effect=updates.UpdateError("disk full")):
+                self.click("confirmSwitchButton")
+            self.assertTrue(self.visible("retryUpdate"))
+            with patch("linux_theming.updates.discard_previous"):
+                self.click("deleteKept")
+                self.click("confirmDeleteButton")
+        self.assertFalse(self.visible("retryUpdate"))
+        self.assertEqual(self.controller._update_retry, "check")
+
     def test_failed_delete_keeps_the_pending_restart_and_retry(self):
         running = updates.__version__
         kept = {"version": running, "path": "/k", "size": 78_000_000, "sha256": "b" * 64, "saved": "",

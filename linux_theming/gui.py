@@ -109,6 +109,7 @@ class Controller(QObject):
         self._offer_target = {}  # The AppImage as it was when the offered release was checked.
         self._update_retry = ""
         self._restore_from = ""  # Update status when a switch to the kept copy started.
+        self._restore_approved = {}  # The kept copy the person confirmed switching to.
         # The AppImage file this window can vouch for, and the version in it: the one
         # started, then whatever this window installed. Any other change to the file
         # makes its version unknown here; nothing is offered until a restart.
@@ -494,7 +495,13 @@ class Controller(QObject):
                 self.publish_update(status="installed", installed=result["version"], restored=restored,
                                     error="", notice="", **common)
             # The kept copy to offer depends on the version now in the file.
-            self.publish_update(previous=self.previous_update())
+            previous = self.previous_update()
+            if error and restored and not self.same_kept(previous, self._restore_approved):
+                self._update_retry = "check"  # Confirm a switch to the new copy again.
+                self.publish_update(previous=previous, keptError="The kept copy changed after it was shown. "
+                                    "Review it again.")
+            else:
+                self.publish_update(previous=previous)
         return complete
 
     @Slot()
@@ -512,9 +519,10 @@ class Controller(QObject):
                         self.finish_update(False))
 
     @Slot()
-    def restorePrevious(self):
+    def restorePrevious(self, retry=False):
         current = self.disk_version()
-        reviewed = self._state["update"]["previous"]
+        # A retry repeats the switch that was confirmed, never one to a copy shown later.
+        reviewed = self._restore_approved if retry else self._state["update"]["previous"]
         if self._update_work is not None or not reviewed or self._state["update"]["status"] == "working":
             return
         self._update_target = target = self.current_target()
@@ -522,12 +530,13 @@ class Controller(QObject):
             # Shown where the dialog explains why this copy cannot change; a pending restart stays.
             self.publish_update(path=target["path"], problem=target["problem"])
             return
-        if {key: updates.read_previous(self.paths, current).get(key) for key in ("version", "path", "sha256")} != {
-                key: reviewed.get(key) for key in ("version", "path", "sha256")}:
+        if not self.same_kept(updates.read_previous(self.paths, current), reviewed):
+            self._update_retry = "check" if retry else self._update_retry
             self.publish_update(previous=self.previous_update(),
                                 keptError="The kept copy changed after it was shown. Review it again.")
             return
         self._update_retry = "restore"
+        self._restore_approved = dict(reviewed)
         self._restore_from = self._state["update"]["status"]
         self.publish_update(status="working", operation="restore", phase="download", done=0, total=reviewed["size"],
                             error="", notice="", cancelling=False, keptError="")
@@ -536,12 +545,17 @@ class Controller(QObject):
                                                      progress=work.report, cancelled=work.cancel),
                         self.finish_update(True))
 
+    @staticmethod
+    def same_kept(first, second):
+        keys = ("version", "path", "sha256")
+        return bool(first) and bool(second) and all(first.get(key) == second.get(key) for key in keys)
+
     @Slot()
     def retryUpdate(self):
         if self._update_retry == "install" and self._update_release is not None:
             self.installUpdate()
         elif self._update_retry == "restore":
-            self.restorePrevious()
+            self.restorePrevious(retry=True)
         else:
             self.checkForUpdates()
 
@@ -558,7 +572,9 @@ class Controller(QObject):
             return
 
         def complete(_result, error):
-            # Its own message: the update status, its retry and a pending restart stay as they were.
+            # Its own message: the update status and a pending restart stay as they were.
+            if not error and self._update_retry == "restore":
+                self._update_retry = "check"  # Nothing is left to switch to.
             self.publish_update(previous=self.previous_update(), keptError=f"The kept copy was not deleted: {error}"
                                 if error else "", notice="" if error else "The kept copy was deleted.")
         reviewed, current = dict(self._state["update"]["previous"]), self.disk_version()
