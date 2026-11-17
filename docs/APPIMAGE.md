@@ -37,6 +37,9 @@ offscreen smoke test passes. Qt and host graphics drivers use the same host C++
 runtime.
 CI also installs the Qt X11 dependencies on the build runner so PyInstaller can
 bundle them, and tests the AppImage through X11/OpenGL before publication.
+The single-instance socket diagnostic runs before QML creates its window, so
+cold graphics initialization cannot consume the IPC acknowledgement deadline.
+The GUI diagnostic then exercises the window and rendering separately.
 
 ## Build
 

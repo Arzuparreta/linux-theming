@@ -2,12 +2,58 @@
 
 import importlib.util
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from linux_theming.smoke import isolated_environment
+
+
+@unittest.skipUnless(importlib.util.find_spec("PySide6"), "Install requirements-gui.txt for Qt diagnostics")
+class SmokeStartupTests(unittest.TestCase):
+    def test_slow_first_render_does_not_expire_instance_diagnostic(self):
+        # A cold X11/Mesa first frame can occupy processEvents longer than the
+        # IPC client's three-second deadline. Reproduce that delay offscreen.
+        code = '''
+import sys
+import time
+from unittest.mock import patch
+from PySide6.QtCore import QTimer
+from PySide6.QtQml import QQmlApplicationEngine
+from linux_theming.__main__ import main
+
+load = QQmlApplicationEngine.load
+def slow_frame():
+    time.sleep(3.2)
+    print("SLOW FRAME COMPLETED", flush=True)
+
+def load_with_slow_frame(engine, url):
+    load(engine, url)
+    QTimer.singleShot(0, slow_frame)
+
+sys.argv = ["linux-theming", "--smoke-test"]
+with patch.object(QQmlApplicationEngine, "load", load_with_slow_frame):
+    sys.exit(main())
+'''
+        with tempfile.TemporaryDirectory(prefix="dt-smoke-caller-") as caller:
+            environment = dict(os.environ)
+            for key in ("APPIMAGE", "APPDIR", "LD_LIBRARY_PATH", "QT_PLUGIN_PATH",
+                        "QT_QPA_PLATFORM_PLUGIN_PATH", "QML2_IMPORT_PATH", "QML_IMPORT_PATH"):
+                environment.pop(key, None)
+            environment.update(HOME=caller, QT_QPA_PLATFORM="offscreen", QT_QUICK_BACKEND="software")
+            for key in ("XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME"):
+                environment[key] = str(Path(caller) / key)
+            result = subprocess.run([sys.executable, "-c", code], env=environment,
+                                    cwd=Path(__file__).resolve().parents[1],
+                                    capture_output=True, text=True, timeout=90)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("SLOW FRAME COMPLETED", result.stdout)
+            self.assertIn("PASS: single-instance navigation request", result.stdout)
+            self.assertIn("PASS: QML,", result.stdout)
+            self.assertEqual(list(Path(caller).iterdir()), [])
 
 
 @unittest.skipUnless(importlib.util.find_spec("PIL"), "Install Pillow for bundled diagnostics")

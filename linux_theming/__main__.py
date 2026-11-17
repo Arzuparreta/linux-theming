@@ -116,6 +116,21 @@ def main():
                   "its own window.", file=sys.stderr)
             server.close()
             server = None
+    if diagnostic and not measuring:
+        from . import launcher
+
+        # The IPC round-trip pumps Qt events with a bounded client timeout.
+        # Run it before QML queues its first frame: cold X11/OpenGL setup can
+        # occupy processEvents past that deadline even when QtNetwork works.
+        try:
+            print(launcher.exercise())
+            print(instance.exercise(app))
+        except Exception as exc:
+            import traceback
+
+            traceback.print_exc()
+            print(f"FAIL: {exc}")
+            return 1
     controller = Controller()
     engine = QQmlApplicationEngine()
     engine.setInitialProperties({"controller": controller,
@@ -129,18 +144,6 @@ def main():
     if server is not None:
         server.requested.connect(lambda request, notice, token:
                                  activated(root, controller, request, notice, token))
-    if diagnostic and not measuring:
-        from . import launcher
-
-        try:
-            print(launcher.exercise())
-            print(instance.exercise(app))
-        except Exception as exc:
-            import traceback
-
-            traceback.print_exc()
-            print(f"FAIL: {exc}")
-            return 1
     if measuring:
         from .timing import observe
 
