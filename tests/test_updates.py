@@ -172,7 +172,9 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(release["status"], "available")
         self.assertEqual(release["version"], "9.0.0")
         self.assertEqual(release["asset"]["sha256"], self.server.checksum)
-        self.assertTrue(release["asset"]["confirmed"])
+        # A mirror supplies both checksums itself; only GitHub's API confirms one.
+        self.assertFalse(release["asset"]["confirmed"])
+        self.assertEqual(release["mirror"], self.server.base)
         self.assertEqual(release["page"], self.server.base + "/releases/tag/v9.0.0")
         for current in ("9.0.0", "9.0.1", "10.0.0"):
             with self.subTest(current=current):
@@ -207,9 +209,28 @@ class UpdateTests(unittest.TestCase):
                     updates.check(current="8.0.0", machine="x86_64",
                                   environ={updates.SOURCE_VARIABLE: server.base})
 
-    def test_check_without_github_digest_relies_on_the_checksum_file(self):
+    def github(self):
+        """The default GitHub source, with requests answered by the loopback server."""
+        base = self.server.base
+
+        class Transport:
+            def open(self, request, timeout):
+                url = request.full_url
+                for prefix in ("https://api.github.com/repos/" + updates.REPOSITORY,
+                               "https://github.com/" + updates.REPOSITORY):
+                    url = url.replace(prefix, base)
+                return urllib.request.urlopen(urllib.request.Request(url, headers=dict(request.header_items())),
+                                              timeout=timeout)
+        self.server.asset_url = f"https://github.com/{updates.REPOSITORY}/releases/download/v9.0.0/{NAME}"
+        return Transport()
+
+    def test_github_digest_confirms_the_checksum_file(self):
+        release = updates.check(current="8.0.0", machine="x86_64", environ={}, transport=self.github())
+        self.assertTrue(release["asset"]["confirmed"])
+        self.assertEqual(release["mirror"], "")
         self.server.digest = None
-        self.assertFalse(self.check()["asset"]["confirmed"])
+        release = updates.check(current="8.0.0", machine="x86_64", environ={}, transport=self.github())
+        self.assertFalse(release["asset"]["confirmed"])
 
     def test_check_explains_rate_limits_and_missing_releases(self):
         reset = int(time.time()) + 600
@@ -304,6 +325,38 @@ class UpdateTests(unittest.TestCase):
             self.install()
         self.assertNotIn(f"/releases/download/v9.0.0/{NAME}", self.server.requests)
 
+    def test_verified_file_replaced_before_running_or_installing_is_rejected(self):
+        # While the new program's probe runs, or while the current version is kept,
+        # another process puts different bytes at the verified file's name.
+        for moment in ("probe", "keep"):
+            with self.subTest(moment=moment):
+                def swap(path, *, moment=moment, original=self.fake_version, **options):
+                    answer = original(path, **options)
+                    if (moment == "probe" and path.name.endswith(".download")
+                            or moment == "keep" and path.name.startswith(".incoming")):
+                        staged = next(self.apps.glob(f".{NAME}.*.download"))
+                        forged = self.apps / "forged"
+                        forged.write_bytes(self.server.body)
+                        os.replace(forged, staged)
+                    return answer
+                updates.program_version.side_effect = swap
+                try:
+                    with self.assertRaisesRegex(updates.UpdateError, "changed or replaced by another process"):
+                        self.install()
+                finally:
+                    updates.program_version.side_effect = self.fake_version
+                self.assertIn(b"old", self.installed.read_bytes()[:16])
+                self.assertEqual(self.leftovers(), [])
+
+    def test_late_cancellation_is_honoured_before_replacing(self):
+        phases = []
+        with self.assertRaises(updates.Cancelled):
+            self.install(progress=lambda phase, *_: phases.append(phase),
+                         cancelled=lambda: bool(phases) and phases[-1] == "keep")
+        self.assertNotIn("install", phases)
+        self.assertIn(b"old", self.installed.read_bytes()[:16])
+        self.assertEqual(self.leftovers(), [])
+
     def test_one_update_at_a_time(self):
         release = self.check()
         with (updates._locked(self.paths),
@@ -356,6 +409,15 @@ class UpdateTests(unittest.TestCase):
                 self.assertIn("belongs to another user", updates.installation()["problem"])
             with patch("linux_theming.updates.os.access", return_value=False):
                 self.assertIn("cannot be written by you", updates.installation()["problem"])
+        for mode, private, refused in ((0o777, True, True), (0o1777, False, False),
+                                       (0o775, False, True), (0o775, True, False)):
+            with self.subTest(mode=oct(mode), private=private):
+                self.apps.chmod(mode)
+                with patch("linux_theming.launcher.current_executable", return_value=self.current(self.installed)), \
+                        patch("linux_theming.updates._private_group", return_value=private):
+                    problem = updates.installation()["problem"]
+                self.assertEqual("can be changed by other users" in problem, refused, problem)
+        self.apps.chmod(0o755)
         link = self.root / "link.AppImage"
         link.symlink_to(self.installed)
         with patch("linux_theming.launcher.current_executable", return_value=self.current(link)):
@@ -371,12 +433,15 @@ class UpdateTests(unittest.TestCase):
 
     def test_program_version_runs_in_a_disposable_profile(self):
         script = self.root / "probe"
-        script.write_text('#!/bin/sh\necho "runtime noise" >&2\nprintf "%s %s\\n" "$HOME" "${APPIMAGE-none}" > '
+        script.write_text('#!/bin/sh\necho "runtime noise" >&2\nprintf "%s %s %s %s\\n" "$HOME" "${APPIMAGE-none}" '
+                          '"${DISPLAY-none}" "${DBUS_SESSION_BUS_ADDRESS-none}" > '
                           f'"{self.root}/seen"\necho 9.0.0\n')
         script.chmod(0o700)
-        with patch.dict(os.environ, {"APPIMAGE": "/outer.AppImage"}):
+        session = {"APPIMAGE": "/outer.AppImage", "DISPLAY": ":0", "DBUS_SESSION_BUS_ADDRESS": "unix:path=/x"}
+        with patch.dict(os.environ, session):
             self.assertEqual(self.real_program_version(script, scratch=self.root), "9.0.0")
-        home, appimage = (self.root / "seen").read_text().split()
+        home, appimage, display, bus = (self.root / "seen").read_text().split()
+        self.assertEqual((display, bus), ("none", "none"))
         self.assertTrue(home.startswith(str(self.root / "probe-")))
         self.assertEqual(appimage, "none")
         self.assertFalse(Path(home).exists())

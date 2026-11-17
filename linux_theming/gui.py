@@ -107,7 +107,11 @@ class Controller(QObject):
         self._update_work = None
         self._update_release = None
         self._update_target = {}
+        self._offer_target = {}  # The AppImage as it was when the offered release was checked.
         self._update_retry = ""
+        # The file this window was started from. If it changes later, the version on
+        # disk is unknown here and no update or switch is offered until a restart.
+        self._startup_target = updates.installation()
         self.relaunch_arguments = None
         self._revision = 0
         self._preview_work = None
@@ -328,13 +332,14 @@ class Controller(QObject):
 
     def initial_update(self):
         try:
-            page, problem = updates.source().page, ""
+            source = updates.source()
+            page, mirror, problem = source.page, source.mirror, ""
         except updates.UpdateError as exc:
-            page, problem = f"https://github.com/{updates.REPOSITORY}/releases", str(exc)
+            page, mirror, problem = f"https://github.com/{updates.REPOSITORY}/releases", "", str(exc)
         preference = updates.preferences(self.paths)
         return {"status": "idle", "current": updates.__version__, "version": "", "page": page,
                 "releases": page, "published": "", "size": "", "sha256": "", "confirmed": False,
-                "path": "", "problem": "", "sourceProblem": problem, "phase": "", "done": 0, "total": 0,
+                "path": "", "problem": "", "sourceProblem": problem, "mirror": mirror, "phase": "", "done": 0, "total": 0,
                 "error": "", "notice": "", "automatic": preference["automatic"],
                 "lastCheck": preference["last_check"], "previous": {}, "installed": "", "restored": False,
                 "operation": "", "retry": "check", "keptIn": str(updates.directory(self.paths) / "previous")}
@@ -363,16 +368,30 @@ class Controller(QObject):
         if self._update_work is not None:
             self.publish_update(phase=phase, done=done, total=total)
 
+    def current_target(self):
+        target = updates.installation()
+        started = self._startup_target.get("fingerprint")
+        if (not target["problem"] and started and target["fingerprint"] != started
+                and self._state["update"]["status"] != "installed"):
+            target = dict(target, problem=f"{target['path']} was replaced after this window started, so the "
+                          "version it contains is unknown here. Restart Linux Theming, then check again.")
+        return target
+
     @Slot()
     def openUpdates(self):
         """Read where an update would go. Local and instant; nothing is contacted."""
         if self._update_work is not None:
             return
-        self._update_target = updates.installation()
+        self._update_target = target = self.current_target()
         preference = updates.preferences(self.paths)
-        self.publish_update(path=self._update_target["path"], problem=self._update_target["problem"],
-                            previous=self.previous_update(), automatic=preference["automatic"],
-                            lastCheck=preference["last_check"])
+        stale = {}
+        if self._update_release is not None and (target["problem"]
+                                                 or target.get("fingerprint") != self._offer_target.get("fingerprint")):
+            # Never install an offer reviewed against a different file.
+            self._update_release, self._offer_target = None, {}
+            stale = {"status": "idle", "notice": "The AppImage changed after the last check. Check again."}
+        self.publish_update(path=target["path"], problem=target["problem"], previous=self.previous_update(),
+                            automatic=preference["automatic"], lastCheck=preference["last_check"], **stale)
 
     @Slot()
     def checkForUpdates(self, automatic=False):
@@ -381,7 +400,7 @@ class Controller(QObject):
             if state["sourceProblem"] and not automatic:
                 self.publish_update(status="error", error=state["sourceProblem"])
             return
-        self._update_target = updates.installation()
+        self._update_target = target = self.current_target()
         self._update_retry = "check"
         if not automatic:
             self.publish_update(status="checking", error="", notice="", path=self._update_target["path"],
@@ -403,6 +422,7 @@ class Controller(QObject):
                 return
             available = result["status"] == "available"
             self._update_release = result if available else None
+            self._offer_target = dict(target) if available else {}
             asset = result.get("asset", {})
             if automatic and not available:
                 self.publish_update(**with_stamp)
@@ -410,6 +430,7 @@ class Controller(QObject):
             self.publish_update(status=result["status"], version=result["version"], page=result["page"],
                                 published=result["published"], size=updates.megabytes(asset["size"]) if asset else "",
                                 sha256=asset.get("sha256", ""), confirmed=asset.get("confirmed", False),
+                                mirror=result.get("mirror", ""), path=target["path"], problem=target["problem"],
                                 error="", **with_stamp)
         self.run_update(lambda work: updates.check(), complete)
 
@@ -426,7 +447,8 @@ class Controller(QObject):
 
     def finish_update(self, restored):
         def complete(result, error):
-            self._update_target = updates.installation()
+            # After a successful install the file differs from the one started, by design.
+            self._update_target = self.current_target() if error else updates.installation()
             common = {"phase": "", "previous": self.previous_update(), "path": self._update_target["path"],
                       "problem": self._update_target["problem"]}
             if isinstance(result, updates.Cancelled):
@@ -441,7 +463,8 @@ class Controller(QObject):
 
     @Slot()
     def installUpdate(self):
-        release, target = self._update_release, self._update_target
+        # The file as it was reviewed; the engine refuses it if it has changed since.
+        release, target = self._update_release, self._offer_target
         if (self._update_work is not None or release is None or target.get("problem")
                 or self._state["update"]["status"] not in ("available", "error")):
             return
@@ -457,7 +480,7 @@ class Controller(QObject):
         saved = updates.read_previous(self.paths)
         if self._update_work is not None or not saved or self._state["update"]["status"] in ("installed", "working"):
             return
-        self._update_target = target = updates.installation()
+        self._update_target = target = self.current_target()
         if target["problem"]:
             self.publish_update(status="error", error=target["problem"], problem=target["problem"])
             return

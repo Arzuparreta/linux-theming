@@ -237,6 +237,47 @@ class UpdateDialogTests(unittest.TestCase):
         self.assertTrue(self.update["restored"])
         self.assertTrue(self.visible("updateInstalled"))
 
+    def test_offer_is_bound_to_the_appimage_that_was_checked(self):
+        self.open()
+        with patch("linux_theming.updates.check", return_value=RELEASE):
+            self.click("checkUpdates")
+        self.window.findChild(QObject, "updateDialog").close()
+        self.settle()
+        # Replaced by hand after the check (a different file), then the dialog reopens.
+        self.target = dict(self.target, fingerprint="9:9:9")
+        self.controller._startup_target = dict(self.target)  # Not the startup-change case.
+        self.open()
+        self.assertEqual(self.update["status"], "idle")
+        self.assertIn("changed after the last check", self.update["notice"])
+        self.assertFalse(self.visible("installUpdate"))
+        with patch("linux_theming.updates.install") as install:
+            self.controller.installUpdate()
+        install.assert_not_called()
+
+    def test_install_uses_the_file_reviewed_at_check_time(self):
+        self.open()
+        with patch("linux_theming.updates.check", return_value=RELEASE):
+            self.click("checkUpdates")
+        self.target = dict(self.target, fingerprint="9:9:9")  # Changed without reopening.
+        with patch("linux_theming.updates.install", side_effect=updates.UpdateError("changed")) as install:
+            self.click("installUpdate")
+        self.assertEqual(install.call_args.args[2]["fingerprint"], "1:2:3")
+
+    def test_appimage_replaced_after_start_is_not_updated(self):
+        self.target = dict(self.target, fingerprint="7:7:7")
+        self.open()
+        self.assertTrue(self.visible("updateUnsupported"))
+        self.assertIn("replaced after this window started", self.update["problem"])
+        with patch("linux_theming.updates.check", return_value=RELEASE):
+            self.click("checkUpdates")
+        self.assertFalse(self.enabled("installUpdate"))
+
+    def test_mirror_source_is_disclosed(self):
+        self.assertFalse(self.visible("updateMirror"))
+        self.controller.publish_update(mirror="https://mirror.example/linux-theming")
+        self.open()
+        self.assertTrue(self.visible("updateMirror"))
+
     def test_automatic_check_is_opt_in_daily_and_quiet(self):
         with patch("linux_theming.updates.check") as check:
             self.controller.automaticUpdateCheck()

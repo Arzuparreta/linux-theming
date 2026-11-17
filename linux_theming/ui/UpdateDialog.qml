@@ -73,6 +73,14 @@ Sheet {
         spacing: 14
 
         Banner {
+            objectName: "updateMirror"
+            Layout.fillWidth: true
+            visible: !!u.mirror
+            tone: "warning"
+            title: "Updates come from " + (u.mirror || "") + ", not GitHub"
+            body: "LINUX_THEMING_UPDATE_URL replaces this project's GitHub Releases. That source provides both the download and its checksums; install only if you trust it."
+        }
+        Banner {
             objectName: "updateUnsupported"
             Layout.fillWidth: true
             visible: !!u.problem

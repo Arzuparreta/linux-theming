@@ -194,12 +194,17 @@ SHA-256 first. The engine (`linux_theming/updates.py`) then:
    built from the release tag; release metadata cannot redirect it to another
    host, and redirects to plain HTTP are refused.
 3. Checks the type 2 AppImage header and starts the new program once with
-   `--version` in a temporary HOME/XDG; it must report the release version.
+   `--version` in a temporary HOME/XDG, with only PATH, locale and library
+   variables and no display, D-Bus or agent endpoint; it must report the release
+   version. This limits accidental contact with the desktop; it is not a sandbox.
+   The verified file's identity is checked again before it runs and before the
+   rename, so different bytes put at its name are refused.
 4. Copies the AppImage being replaced to
    `$XDG_STATE_HOME/linux-theming/updates/previous/` (private, one version kept),
    verified the same way, with a checksum record in `previous.json`.
 5. Replaces the AppImage by rename in the same folder. A file changed, moved or
-   replaced since the check is never overwritten.
+   replaced since the check is never overwritten; reopening the dialog after such
+   a change withdraws the offer. Cancelling is honoured until the rename starts.
 
 Running windows keep their original file until they restart. **Restart now** waits
 until this process has exited, so the single-instance endpoint and the AppImage
@@ -212,8 +217,12 @@ the menu entry keeps working because the path stays the same.
 
 An AppImage is not updated, and the release page is offered instead, when it was
 not started as an AppImage (source checkouts), is reached through a symbolic link,
-belongs to another user, or is in a folder you cannot write (for example `/opt`
-installed by an administrator or package manager). Nothing runs as root.
+belongs to another user, is in a folder you cannot write (for example `/opt`
+installed by an administrator or package manager), or when its folder or any
+folder above it can be changed by another user (writable by others or by a shared
+group, without the sticky bit). It is also not updated when the file was replaced
+after the window started, because the version it contains is then unknown; restart
+first. Nothing runs as root.
 
 The SHA-256 checks protect against corrupted or truncated downloads and against
 metadata pointing elsewhere. They establish the same trust as downloading the
@@ -232,7 +241,9 @@ TMPDIR="$PWD/build/smoke-tmp" dist/LinuxTheming-x86_64.AppImage --smoke-test-upd
 
 `LINUX_THEMING_UPDATE_URL` replaces the GitHub source for testing or a mirror
 with the same layout (`/releases/latest`, `/releases/download/vX.Y.Z/<asset>`).
-It must be `https://`, or `http://` on 127.0.0.1, ::1 or localhost.
+It must be `https://`, or `http://` on 127.0.0.1, ::1 or localhost. The dialog then
+names that source. Its checksums come from the same source as the download, so they
+are never presented as confirmed by GitHub; use only a source you trust.
 
 ## GitHub Releases
 

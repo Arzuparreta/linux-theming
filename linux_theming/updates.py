@@ -16,11 +16,13 @@ updatable, with the release page for a manual download.
 
 import contextlib
 import fcntl
+import grp
 import hashlib
 import http.client
 import json
 import os
 import platform
+import pwd
 import re
 import secrets
 import shutil
@@ -60,6 +62,11 @@ CA_FILES = ("/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundle.
 # Set by the AppImage runtime and PyInstaller for this process only. A child that
 # inherits them can mistake itself for part of this bundle.
 PRIVATE_VARIABLES = ("APPIMAGE", "APPDIR", "ARGV0", "OWD")
+# The only variables a --version probe receives besides its temporary profile. It
+# gets no display, D-Bus, agent or other session endpoint. This limits accidental
+# contact with the desktop; it is not a security sandbox.
+PROBE_VARIABLES = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES", "TZ", "LD_LIBRARY_PATH",
+                   "PYINSTALLER_RESET_ENVIRONMENT")
 # Started with the read end of a pipe whose only writer is this process. The read
 # returns when the kernel closes that end at exit, after the single-instance
 # endpoint and the AppImage mount are released; it does not depend on process IDs,
@@ -82,6 +89,7 @@ class Source:
     downloads: str
     page: str
     loopback: bool = False
+    mirror: str = ""  # Set when LINUX_THEMING_UPDATE_URL replaces GitHub.
 
 
 # --- Versions and locations ----------------------------------------------------
@@ -134,7 +142,7 @@ def source(environ=None):
     if parts.query or parts.fragment or not _transport_allowed(base, loopback):
         raise UpdateError(f"{SOURCE_VARIABLE} must be an https:// address, or http:// on this "
                           "computer (127.0.0.1, ::1 or localhost), without a query.")
-    return Source(base + "/releases/latest", base + "/releases/download", base + "/releases", loopback)
+    return Source(base + "/releases/latest", base + "/releases/download", base + "/releases", loopback, base)
 
 
 def tls_context(environ=None):
@@ -224,7 +232,7 @@ def check(*, current=__version__, machine=None, environ=None, transport=None):
         raise UpdateError(f"The latest release {tag} is marked as a draft or pre-release.")
     version = tag[1:]
     installed = parse_version(current)
-    result = {"status": "current", "current": current, "version": version, "tag": tag,
+    result = {"status": "current", "current": current, "version": version, "tag": tag, "mirror": src.mirror,
               "page": f"{src.page}/tag/{tag}",
               "published": str(release.get("published_at") or "")[:10]}
     if installed is not None and parse_version(version) <= installed:
@@ -250,13 +258,16 @@ def check(*, current=__version__, machine=None, environ=None, transport=None):
         raise UpdateError(f"The checksum file of release {tag} does not describe {name}.")
     checksum = match.group(1)
     digest = asset.get("digest")
-    if digest is not None:
+    if digest is not None:  # Even from a mirror, a contradiction is never ignored.
         published = DIGEST.fullmatch(digest) if isinstance(digest, str) else None
         if not published or published.group(1) != checksum:
             raise UpdateError(f"GitHub's checksum for {name} differs from the release's checksum "
                               "file. It was not used.")
+    # Only GitHub's own API can confirm the checksum file independently; a mirror
+    # supplies both values itself.
     result.update(status="available", asset={"name": name, "size": size, "sha256": checksum, "url": url,
-                                             "confirmed": digest is not None})
+                                             "confirmed": digest is not None and not src.mirror},
+                  mirror=src.mirror)
     return result
 
 
@@ -284,6 +295,11 @@ def installation(environ=None):
         return {"path": path, "problem": f"{path} belongs to another user, probably an administrator or "
                 "package manager. Update it the same way it was installed."}
     folder = os.path.dirname(path)
+    shared = modifiable_by_others(folder)
+    if shared is not None:
+        return {"path": path, "problem": f"{shared} can be changed by other users, so a verified download "
+                "there could be swapped before it is installed. Move the AppImage to a folder only you can "
+                "change, such as ~/Applications."}
     if not os.access(folder, os.W_OK | os.X_OK):
         return {"path": path, "problem": f"The folder {folder} cannot be written by you, so the AppImage "
                 "there cannot be replaced. Update it the way it was installed, or move it to a folder "
@@ -291,6 +307,33 @@ def installation(environ=None):
     return {"path": path, "problem": "", "size": info.st_size,
             "fingerprint": f"{info.st_dev}:{info.st_ino}:{info.st_mtime_ns}",
             "extract_and_run": bool(current.get("extract_and_run"))}
+
+
+def _private_group(gid):
+    try:
+        group = grp.getgrgid(gid)
+        me = pwd.getpwuid(os.getuid()).pw_name
+        members = set(group.gr_mem) | {entry.pw_name for entry in pwd.getpwall() if entry.pw_gid == gid}
+    except (KeyError, OSError):
+        return False
+    return members <= {me}
+
+
+def modifiable_by_others(folder):
+    """The first folder, from this one up to /, whose entries another user could replace."""
+    me = os.getuid()
+    for candidate in [Path(folder), *Path(folder).parents]:
+        try:
+            info = os.stat(candidate)
+        except OSError:
+            return candidate
+        if info.st_uid not in (0, me):
+            return candidate
+        if info.st_mode & stat.S_ISVTX:
+            continue  # Others cannot rename or remove entries they do not own.
+        if info.st_mode & stat.S_IWOTH or info.st_mode & stat.S_IWGRP and not _private_group(info.st_gid):
+            return candidate
+    return None
 
 
 def _fingerprint(path):
@@ -339,7 +382,7 @@ def program_version(path, *, extract_and_run=False, scratch=None, timeout=PROBE_
     # answered; a cleanup failure must not turn a verified answer into an error.
     with tempfile.TemporaryDirectory(prefix="probe-", dir=scratch, ignore_cleanup_errors=True) as temporary:
         root = Path(temporary)
-        env = child_environment()
+        env = {key: value for key, value in child_environment().items() if key in PROBE_VARIABLES}
         env.update(HOME=str(root), XDG_CONFIG_HOME=str(root / "config"), XDG_DATA_HOME=str(root / "data"),
                    XDG_STATE_HOME=str(root / "state"), XDG_CACHE_HOME=str(root / "cache"))
         if extract_and_run:
@@ -362,12 +405,12 @@ def program_version(path, *, extract_and_run=False, scratch=None, timeout=PROBE_
     return lines[-1]
 
 
-def _verify_program(path, version, *, extract_and_run, scratch, what="downloaded program"):
+def _verify_program(path, version, identity, *, extract_and_run, scratch, what="downloaded program"):
     with open(path, "rb") as stream:
         head = stream.read(11)
     if head[:4] != b"\x7fELF" or head[8:11] != b"AI\x02":
         raise UpdateError(f"The {what} is not a type 2 AppImage. Nothing was replaced.")
-    os.chmod(path, 0o700)
+    _same_staged(path, identity, 0o700)
     answered = program_version(path, extract_and_run=extract_and_run, scratch=scratch, what=what)
     if answered != version:
         raise UpdateError(f"The {what} reports version {answered!r}, not {version}. "
@@ -410,6 +453,7 @@ def _copy_hashed(stream, staged, size, *, progress, cancelled, phase, what="AppI
     except OSError as exc:
         raise UpdateError(f"{staged} cannot be created: {exc.strerror}. Nothing was replaced.") from None
     with os.fdopen(fd, "wb") as output:
+        written = os.fstat(output.fileno())
         while True:
             if cancelled():
                 raise Cancelled("The update was cancelled. Nothing was replaced.")
@@ -438,7 +482,25 @@ def _copy_hashed(stream, staged, size, *, progress, cancelled, phase, what="AppI
     if received != size:
         raise UpdateError(f"The download stopped after {megabytes(received)} of {megabytes(size)}. "
                           "Nothing was replaced; try again.")
-    return digest.hexdigest()
+    return digest.hexdigest(), (written.st_dev, written.st_ino)
+
+
+def _same_staged(staged, identity, mode=None):
+    """The verified file is still the one at this name; optionally set its mode through it."""
+    try:
+        fd = os.open(staged, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        fd = None
+    try:
+        info = os.fstat(fd) if fd is not None else None
+        if (info is None or (info.st_dev, info.st_ino) != identity or info.st_uid != os.getuid()
+                or info.st_nlink != 1 or not stat.S_ISREG(info.st_mode)):
+            raise UpdateError("The verified file was changed or replaced by another process. Nothing was replaced.")
+        if mode is not None:
+            os.fchmod(fd, mode)
+    finally:
+        if fd is not None:
+            os.close(fd)
 
 
 def read_previous(paths):
@@ -468,9 +530,9 @@ def _keep_previous(paths, target, *, cancelled, progress):
             info = os.fstat(stream.fileno())
             if f"{info.st_dev}:{info.st_ino}:{info.st_mtime_ns}" != target["fingerprint"]:
                 _unchanged(target)
-            checksum = _copy_hashed(stream, incoming, info.st_size, progress=progress,
-                                    cancelled=cancelled, phase="keep", what="current AppImage", network=False)
-        os.chmod(incoming, 0o700)
+            checksum, identity = _copy_hashed(stream, incoming, info.st_size, progress=progress, cancelled=cancelled,
+                                              phase="keep", what="current AppImage", network=False)
+        _same_staged(incoming, identity, 0o700)
         version = program_version(incoming, extract_and_run=target.get("extract_and_run", False),
                                   scratch=directory(paths), what="current AppImage")
         if parse_version(version) is None:
@@ -490,10 +552,10 @@ def _keep_previous(paths, target, *, cancelled, progress):
     return record
 
 
-def _replace(target, staged):
+def _replace(target, staged, identity):
     _unchanged(target)
     mode = stat.S_IMODE(os.stat(target["path"]).st_mode) | stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR
-    os.chmod(staged, mode)
+    _same_staged(staged, identity, mode)
     _unchanged(target)  # As late as possible before the rename.
     os.replace(staged, target["path"])
     changes.sync_directory(Path(target["path"]).parent)
@@ -521,19 +583,21 @@ def install(paths, release, target, *, progress=lambda *_: None, cancelled=lambd
                 declared = response.headers.get("Content-Length")
                 if declared is not None and declared.strip() != str(asset["size"]):
                     raise UpdateError("The download size differs from the release. Nothing was replaced.")
-                checksum = _copy_hashed(response, staged, asset["size"], progress=progress,
-                                        cancelled=cancelled, phase="download")
+                checksum, identity = _copy_hashed(response, staged, asset["size"], progress=progress,
+                                                  cancelled=cancelled, phase="download")
             if checksum != asset["sha256"]:
                 raise UpdateError("The download does not match the release checksum. Nothing was replaced.")
             progress("verify", 0, 0)
-            _verify_program(staged, release["version"], extract_and_run=target.get("extract_and_run", False),
-                            scratch=directory(paths))
+            _verify_program(staged, release["version"], identity,
+                            extract_and_run=target.get("extract_and_run", False), scratch=directory(paths))
             if cancelled():
                 raise Cancelled("The update was cancelled. Nothing was replaced.")
             progress("keep", 0, target["size"])
             previous = _keep_previous(paths, target, cancelled=cancelled, progress=progress)
+            if cancelled():  # The last point at which cancelling is honoured.
+                raise Cancelled("The update was cancelled. Nothing was replaced.")
             progress("install", 0, 0)
-            _replace(target, staged)
+            _replace(target, staged, identity)
         finally:
             staged.unlink(missing_ok=True)
     return {"version": release["version"], "path": target["path"], "previous": previous}
@@ -554,17 +618,21 @@ def restore(paths, target, *, progress=lambda *_: None, cancelled=lambda: False)
         try:
             fd = os.open(saved["path"], os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
             with os.fdopen(fd, "rb") as stream:
-                checksum = _copy_hashed(stream, staged, saved["size"], progress=progress,
-                                        cancelled=cancelled, phase="download", what="kept copy", network=False)
+                checksum, identity = _copy_hashed(stream, staged, saved["size"], progress=progress, cancelled=cancelled,
+                                                  phase="download", what="kept copy", network=False)
             if checksum != saved["sha256"]:
                 raise UpdateError("The kept copy changed since it was saved. Nothing was replaced.")
             progress("verify", 0, 0)
-            _verify_program(staged, saved["version"], extract_and_run=target.get("extract_and_run", False),
+            _verify_program(staged, saved["version"], identity, extract_and_run=target.get("extract_and_run", False),
                             scratch=directory(paths), what="kept copy")
+            if cancelled():
+                raise Cancelled("Switching versions was cancelled. Nothing was replaced.")
             progress("keep", 0, target["size"])
             previous = _keep_previous(paths, target, cancelled=cancelled, progress=progress)
+            if cancelled():
+                raise Cancelled("Switching versions was cancelled. Nothing was replaced.")
             progress("install", 0, 0)
-            _replace(target, staged)
+            _replace(target, staged, identity)
         finally:
             staged.unlink(missing_ok=True)
     return {"version": saved["version"], "path": target["path"], "previous": previous}
