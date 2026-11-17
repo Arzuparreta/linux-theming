@@ -237,7 +237,8 @@ belongs to another user, is in a folder you cannot write (for example `/opt`
 installed by an administrator or package manager), or when another user could
 change any folder that decides where it resolves: its folder, every folder above
 it, and folders holding symbolic links on the way (writable by others, by a shared
-group, or by users named in an ACL, without the sticky bit). The update state
+group, or by users named in an ACL, without the sticky bit), or owns a symbolic
+link on the way. The update state
 folder, its `previous/` folder and every kept copy must be private to you as well,
 because kept copies are run from there; this is checked before any is read or run. It is also not updated when the file was replaced outside the running
 window, because the version it contains is then unknown; restart first. Nothing runs as root.

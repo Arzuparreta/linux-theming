@@ -532,11 +532,12 @@ def _extended_acl(path):
     return len(value) > 4 + 3 * 8  # Header plus the three base entries.
 
 
-def _directories_used(folder):
+def _directories_used(folder, links=None):
     """Every folder whose entries decide where ``folder`` resolves, following each link.
 
     Includes the folders holding intermediate symbolic links, which neither the path
-    as written nor its final resolution shows.
+    as written nor its final resolution shows. The links themselves are appended to
+    ``links``: whoever owns a link can replace it, even inside a sticky folder.
     """
     used, current, pending, hops = [Path("/")], Path("/"), list(Path(folder).parts), 0
     while pending:
@@ -552,6 +553,8 @@ def _directories_used(folder):
         entry = current / part
         used.append(current)
         if entry.is_symlink():
+            if links is not None:
+                links.append(entry)
             hops += 1
             if hops > 40:
                 raise OSError(f"Too many symbolic links in {folder}")
@@ -565,10 +568,17 @@ def _directories_used(folder):
 def modifiable_by_others(folder):
     """The first folder another user could change in a way that swaps files under ``folder``."""
     me = os.getuid()
+    links = []
     try:
-        candidates = _directories_used(folder)
+        candidates = _directories_used(folder, links)
     except OSError:
         return Path(folder)
+    for link in links:
+        try:
+            if os.lstat(link).st_uid not in (0, me):
+                return link
+        except OSError:
+            return link
     for candidate in candidates:
         try:
             info = os.stat(candidate)

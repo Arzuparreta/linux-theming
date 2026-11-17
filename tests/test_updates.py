@@ -675,6 +675,19 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(os.path.realpath(hopping), str(self.root / "real/Apps"))
         self.assertEqual(updates.modifiable_by_others(hopping), shared)
         self.assertIsNone(updates.modifiable_by_others(self.root / "real/Apps"))
+        # A link owned by another user inside a sticky folder can be replaced by that user.
+        sticky = self.root / "sticky"
+        sticky.mkdir(mode=0o1777)
+        sticky.chmod(0o1777)
+        self.addCleanup(sticky.chmod, 0o755)
+        foreign = sticky / "apps"
+        foreign.symlink_to(self.root / "real/Apps")
+        self.assertIsNone(updates.modifiable_by_others(foreign))  # Owned by this user: fine.
+        real_lstat = os.lstat
+        with patch("linux_theming.updates.os.lstat",
+                   side_effect=lambda path, *a, **k: real_lstat(path, *a, **k) if Path(path) != foreign
+                   else os.stat_result((stat.S_IFLNK | 0o777, 0, 0, 1, os.getuid() + 1, 0, 0, 0, 0, 0))):
+            self.assertEqual(updates.modifiable_by_others(foreign), foreign)
         private = self.root / "home/Private"
         private.symlink_to(self.root / "real/Apps")  # Links among private folders are fine.
         self.assertIsNone(updates.modifiable_by_others(private))
