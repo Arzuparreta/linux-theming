@@ -37,6 +37,7 @@ reopen it yourself.
 | Mako | Root/default background, text, border and progress colors | Keep behavior and filter-specific overrides. Use its reload action yourself |
 | GTK 3 | User `gtk-3.0/gtk.css` semantic palette, window/selection defaults, and menus and header bars with their text and buttons | Keep installed theme, icons and fonts. Custom theme rules can override defaults. Reopen applications |
 | GTK 4 / libadwaita | Separate `gtk-4.0/gtk.css` semantic window/view/accent roles and defaults | Application CSS and libadwaita versions may override or ignore roles. Does not recolor GNOME Shell, guarantee all widgets, or change the native light/dark preference. Reopen applications |
+| Thunar | Rules for Thunar's own windows (`window.thunar`) in `gtk-3.0/gtk.css`: title, menu, tool and status bars, location entry and path buttons, side panes, file views and column headers, tabs, split view, scrollbars and selection | No named GTK colors or other applications change. Selected files use GTK's selection colors, the palette's when GTK 3 is also selected. Menus, dialogs and tooltips are separate GTK windows and follow GTK 3. One reviewed write with GTK 3. Quit Thunar completely and open it again. See the scope below |
 | Qt settings | qt5ct/qt6ct custom palette references and generated QPalette role file | Applications must already use the corresponding platform theme. No environment variables, styles, fonts or icons are changed. Both config files are shown in review. Reopen applications |
 | zsh | Native ZLE selection/search/paste roles and optional zsh-syntax-highlighting color roles | Append guarded assignments to `~/.zshrc` or supported `$ZDOTDIR/.zshrc`. Keep prompt, bindings, plugins and aliases. No shell code is evaluated during inspection. Open a new interactive shell |
 | fish | Native syntax, autosuggestion, search, selection and pager roles | Append guarded global assignments to `fish/config.fish`; no universal-variable writes or prompt replacement. Open a new interactive shell |
@@ -119,7 +120,7 @@ VS Code and T3 Code use their own settings/theme watchers; native GNOME/Xfce and
 GNOME Terminal preferences use the desktop settings APIs. Rofi/Wofi read colors
 on their next invocation. Hyprland may watch configuration according to its own
 setup. No process-name signals, restart hooks or extra background daemon are
-added for Ghostty, foot, Sway, notifications, GTK CSS, Qt, shells, btop or tmux;
+added for Ghostty, foot, Sway, notifications, GTK CSS, Thunar, Qt, shells, btop or tmux;
 their manual/native limitations remain in the table.
 
 Validation: a private Xvfb with i3 4.25.1, Kitty 0.50 and Alacritty 0.17 verifies
@@ -177,7 +178,9 @@ invalidated if a file changes again before it is approved. Restoring a detached
 link refuses when its local copy gained edits that the link target lacks. Later
 permission changes are kept. Sway and swaybg compose their changes into one
 reviewed file write, with a shared original snapshot and independently removable
-selections.
+selections. GTK 3 and Thunar share `gtk-3.0/gtk.css` the same way, GTK 3's rules
+first. What one connected integration manages in a shared file is not listed as an
+existing color of the other.
 
 The Qt adapter writes the palette path the way Qt 5 QSettings spells it (Qt 6
 reads the same spelling), so a qt5ct/qt6ct save does not touch the lines we manage.
@@ -198,7 +201,7 @@ colors as well.
 
 The INI editor preserves unrelated entries/comments and rejects duplicate keys or
 sections and unsupported syntax, naming the line (KDE files: see
-[KDE configuration files](#kde-configuration-files)). GTK/Wofi/Waybar stylesheet adapters append
+[KDE configuration files](#kde-configuration-files)). GTK/Thunar/Wofi/Waybar stylesheet adapters append
 palette defaults after everything already in the file and remove nothing:
 imports, layout rules and `!important` declarations stay and keep applying.
 Imported stylesheets are read recursively (local paths and `file://`, at most
@@ -226,7 +229,7 @@ Sway ownership, symlinks and modes, unrelated later edits kept through update,
 undo and disconnection, conflicting edits to managed colors, qt5ct/qt6ct saves
 (simulated and with real QSettings), partial rollback and interrupted recovery. Native GNOME/Xfce/GNOME Terminal protocol tests use simulated commands and never change
 the developer's desktop. Offscreen Qt tests cover selection, unavailable/unknown
-components, approval and export. The bundled smoke test exercises all twenty-three
+components, approval and export. The bundled smoke test exercises all twenty-four
 file adapters, as well as the existing guided Kitty GUI workflow.
 
 KDE adapters are tested against real KDE files: the Breeze color schemes
@@ -323,6 +326,58 @@ native environment themes; validation used the installed **T3 Code 0.1.7** CLI:
 seed in a second disposable environment. This establishes format/selection
 compatibility, not observed appearance in a connected production client.
 
+## Thunar scope
+
+Thunar 4.x is a GTK 3 application with no theme file of its own. Its colors come
+from the GTK theme and the user stylesheet `gtk-3.0/gtk.css`, which every GTK 3
+application reads. Thunar puts the style class `thunar` on its main windows, and
+every rule of this adapter starts with `window.thunar`, so no other application
+matches them. The adapter defines no `@define-color`: named colors in gtk.css are
+shared by all GTK 3 applications, and some themes and programs draw with them.
+
+GTK lets the user stylesheet override the theme for each property it sets,
+whatever the theme's selectors, so the rules set each surface's background and
+text together: the title bar (client-side decorations, used on Wayland or with
+Thunar's own setting), menu bar, toolbar and its buttons in every state,
+location entry and path-bar buttons, the shortcuts and tree side panes, the
+icon, compact and details views with their column headers, tabs (themes give
+Thunar's reorderable tabs a translucent background), the inactive split-view
+pane (Thunar's own rule for it uses `@theme_unfocused_bg_color`), the status
+bar, frames, pane separators, scrollbars and rubber-band selection.
+
+Selected files use GTK's named selection colors, `theme_selected_bg_color` and
+`theme_selected_fg_color`. With file highlighting enabled (Thunar's default when
+GVfs metadata is available), Thunar makes the CSS selection transparent and paints
+selected files itself with those names, and in unfocused windows with
+`theme_unfocused_selected_bg_color` at half opacity
+(`thunar_util_clip_view_background` in Thunar 4.20). Using the same names keeps
+the selection the same with and without highlighting. Thunar alone keeps the GTK
+theme's selection pair; with GTK 3 also selected, those names are the palette
+accent and background. Unfocused windows show the selection as that half-opacity
+blend under the window's text color.
+
+Not covered: context and menu-bar menus, dialogs (properties, preferences,
+progress, bulk rename), tooltips and completion popups are separate GTK windows
+without Thunar's class; they follow the GTK theme, or GTK 3 when it is selected.
+Infobars keep the theme's message colors, and per-file highlight colors chosen in
+Thunar stay as chosen. GTK reads gtk.css when a program starts. Thunar started as
+a daemon (Xfce does this at login) keeps running after its windows close; it
+shows the new colors after `thunar -q` or the next login.
+
+Validation: an automated test applies a reviewed plan, runs the installed Thunar
+on a private GTK broadway display (no window on any screen, private HOME/XDG and
+D-Bus session), reads its widgets' computed colors through a test-only GTK
+module, and compares the window, bars, side pane, file view, location entry and
+an opened menu with the palette; every visible text widget must reach 4.5:1.
+After undo Thunar shows the theme's colors again. During development the same
+method rendered Thunar 4.20.10 with Adwaita, Adwaita dark and HighContrast, dark
+and light palettes, Thunar alone and with GTK 3, icon, compact and details views,
+both side panes, both location bars, tabs, split view, client-side decorations,
+file highlighting and unfocused windows: no visible text widget was below 4.5:1.
+Palette tests check text on every surface at 4.5:1 across five wallpaper palettes
+in both polarities. This covers Thunar 4.20.10 with GTK's built-in themes; other
+themes, Thunar versions and a running desktop session were not observed.
+
 ## Additional application validation
 
 Private tests cover all five new file adapters through application, palette
@@ -334,7 +389,7 @@ styles on a disposable private socket; no user's server is contacted. Native
 GSettings applies and undoes the GNOME Terminal keys using a private relocatable
 schema and keyfile backend, with an unusable desktop bus. Mocked protocol tests
 also cover locked/missing keys, profile changes and partial setter rollback.
-The AppImage smoke test composes all twenty-three file adapters in private roots.
+The AppImage smoke test composes all twenty-four file adapters in private roots.
 These checks do not claim visual acceptance in every real application session.
 
 Additional format references: [Konsole profiles](https://docs.kde.org/stable5/en/konsole/konsole/overview.html),

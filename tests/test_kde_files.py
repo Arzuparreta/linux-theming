@@ -478,6 +478,25 @@ class KdeGtkTests(KdeCase):
         for version in (3, 4):
             self.assertEqual(self.css(version).read_text().strip(), before[version].strip())
 
+    def test_thunar_and_gtk3_follow_kde_rewrites_and_restore_kde_files(self):
+        kde_gtkconfig(self.paths.config, KDE_GTK_COLORS)
+        before = self.css(3).read_text()
+        info = self.connection("thunar")
+        self.assertFalse(info["blocked"], info["issues"])
+        profile = dict(copy.deepcopy(self.base), components=["gtk3", "thunar"],
+                       resolutions={"gtk3": {"replace_colors": True}, "thunar": {"replace_colors": True}})
+        self.apply(profile)
+        text = self.css(3).read_text()
+        self.assertLess(text.index("@import 'colors.css';"), text.index("thunar palette"))
+        kde_gtkconfig(self.paths.config, KDE_GTK_COLORS)
+        self.assertTrue(inventory.managed(self.paths, "thunar"))
+        self.apply(dict(profile, components=["thunar"]))
+        self.assertNotIn("gtk3 palette", self.css(3).read_text())
+        kde_gtkconfig(self.paths.config, KDE_GTK_COLORS)
+        self.apply(self.base)
+        self.assertEqual(self.css(3).read_text().strip(), before.strip())
+        self.assertFalse(inventory.managed(self.paths, "thunar"))
+
     def test_kde_import_after_other_rules_and_imports_is_kept(self):
         # A gtk.css with the user's own import and rules, then KDE's login.
         path = self.css(3)

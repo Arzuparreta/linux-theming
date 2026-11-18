@@ -40,6 +40,8 @@ COMPONENTS = (
     ("mako", "Mako", "Notifications", ("mako",), ("mako",), ("mako/config",)),
     ("gtk3", "GTK 3", "Applications", (), (), ("gtk-3.0/settings.ini", "gtk-3.0/gtk.css")),
     ("gtk4", "GTK 4 / libadwaita", "Applications", (), (), ("gtk-4.0/settings.ini", "gtk-4.0/gtk.css")),
+    ("thunar", "Thunar", "Applications", ("thunar",), ("thunar", "Thunar"),
+     ("xfce4/xfconf/xfce-perchannel-xml/thunar.xml", "gtk-3.0/gtk.css")),
     ("qt", "Qt settings", "Applications", ("qt5ct", "qt6ct"), (),
      ("qt5ct/qt5ct.conf", "qt6ct/qt6ct.conf")),
     ("zsh", "zsh", "Shell", ("zsh",), ("zsh",), ()),

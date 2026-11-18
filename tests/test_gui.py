@@ -731,6 +731,36 @@ class GuiTests(unittest.TestCase):
         self.assertIn("[colors.primary]", self.controller.state["exportText"])
         self.assertEqual(self.messages, [])
 
+    def test_thunar_and_gtk3_share_one_reviewed_gtk_css_change_from_the_window(self):
+        css = self.paths.config / "gtk-3.0/gtk.css"
+        css.parent.mkdir(parents=True)
+        css.write_text("label { color: #123456; }\n")
+        self.window.setProperty("page", 1)
+        for component in ("gtk3", "thunar"):
+            self.click("connect-" + component)
+            connection = self.controller.state["connection"]
+            self.assertFalse(connection["blocked"], connection)
+            # The user's own color is listed and needs explicit consent for each.
+            self.assertEqual([s["value"] for s in connection["sources"]], ["label { color: #123456; }"])
+            self.click("allowReplaceColors")
+            self.click("confirmConnection")
+            self.assertIn(component, self.controller.state["profile"]["components"])
+        self.click("reviewChanges")
+        paths = [item["path"] for item in self.controller.state["review"]["changes"]]
+        self.assertEqual(paths.count(str(css)), 1)
+        self.click("approveChanges")
+        self.assertFalse(self.controller.state["error"])
+        text = css.read_text()
+        self.assertTrue(text.startswith("label { color: #123456; }\n"))
+        self.assertLess(text.index("gtk3 palette"), text.index("window.thunar"))
+        guide = next(g for g in self.controller.state["activation"] if g["id"] == "thunar")
+        self.assertIn("thunar -q", guide["message"])
+        self.controller.reviewUndo(self.controller.state["overview"]["history"][0]["id"], False)
+        self.settle()
+        self.click("approveChanges")
+        self.assertEqual(css.read_text(), "label { color: #123456; }\n")
+        self.assertEqual(self.messages, [])
+
     def test_six_new_application_integrations_review_and_apply_from_the_window(self):
         # This fixture applies six adapters, including native settings, in one task.
         self.operation_timeout = 30

@@ -129,6 +129,8 @@ def activation_guidance(profile, results=(), configuration=None):
         "t3code": "T3 Code watches its native theme files and environment default. Connected web/desktop clients may follow immediately; mobile keeps its own appearance.",
         "rofi": "Open Rofi again to read its saved colors.",
         "wofi": "Open Wofi again to read its saved colors.",
+        "thunar": ("Thunar reads these colors when it starts. Close every Thunar window; if Thunar keeps running "
+                   "in the background (Xfce starts it that way), quit it with thunar -q or log out, then open it again."),
         "kitty": "Kitty 0.47+ supports native auto_reload_config. Reopen once if watching was disabled or kitty.conf did not exist at startup. Older versions need manual reload.",
         "alacritty": "Native live_config_reload is enabled on supported versions. Reopen once if it was disabled; subsequent color changes use Alacritty's watcher.",
         "waybar": "Native CSS watching is enabled when an existing conventional config is available. Reopen Waybar once to start the watcher; later color changes reload its stylesheet.",

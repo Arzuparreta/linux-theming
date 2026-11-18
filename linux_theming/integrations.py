@@ -33,6 +33,8 @@ FILES = {
     "wofi": ("wofi/style.css",),
     "dunst": ("dunst/dunstrc",), "mako": ("mako/config",),
     "gtk3": ("gtk-3.0/gtk.css",), "gtk4": ("gtk-4.0/gtk.css",),
+    # GTK 3 reads one user stylesheet for every application, Thunar included.
+    "thunar": ("gtk-3.0/gtk.css",),
     "qt": ("qt5ct/qt5ct.conf", "qt6ct/qt6ct.conf",
            "linux-theming/themes/qt-colors.conf"),
     "zsh": (), "fish": ("fish/config.fish",),
@@ -63,6 +65,7 @@ CAPABILITIES = {
     "mako": "Default notification colors. Keep behavior and filter-specific overrides. Run its reload action yourself.",
     "gtk3": "GTK 3 user CSS and semantic colors. Keep theme, icons and fonts. Custom themes may override defaults. Reopen applications.",
     "gtk4": "GTK 4 user CSS and semantic colors, including Adwaita accent roles. Application CSS may override them; this does not theme GNOME Shell or guarantee every libadwaita version. Reopen applications.",
+    "thunar": "Thunar's main windows, through GTK 3 user CSS rules that match only Thunar: title, menu, tool and status bars, location bar, side pane, file views, tabs and split view. Other GTK 3 applications and named GTK colors are not changed. Selected files use the GTK selection colors; select GTK 3 as well to take them from the palette. Menus and dialogs follow GTK 3. Quit Thunar completely and open it again.",
     "qt": "qt5ct and qt6ct custom application palettes. Requires applications already using the corresponding platform theme. No environment variables, icons, fonts or styles are changed. Reopen applications.",
     "zsh": "Native ZLE selection/search colors and optional zsh-syntax-highlighting roles. Keep your prompt and plugins. Open a new interactive shell.",
     "fish": "Native interactive syntax, pager and selection colors. Keep prompt and functions. Open a new interactive shell.",
@@ -96,7 +99,7 @@ def root_for(paths, path):
     return changes.config_root(paths, path)
 
 
-CSS_COMPONENTS = ("waybar", "wofi", "gtk3", "gtk4")
+CSS_COMPONENTS = ("waybar", "wofi", "gtk3", "gtk4", "thunar")
 CSS_IMPORT_LIMIT = 32
 
 
@@ -249,6 +252,8 @@ def render(component, value):
         return applications.render(component, value, colors(value))
     c = colors(value)
     bg, fg, accent = c["bg"], c["fg"], c["accent"]
+    if component == "thunar":
+        return gtkcss.thunar(c)
     if component == "alacritty":
         text = (f'[colors.primary]\nbackground = "{bg}"\nforeground = "{fg}"\n'
                 f'[colors.cursor]\ncursor = "{c["cursor"]}"\ntext = "{bg}"\n'
@@ -465,7 +470,7 @@ def transform(paths, component, originals, value):
         texts[scheme] = rendered
     elif component == "rofi":
         texts[first] = rofi.transform(paths, paths_list[0], text, colors(value))
-    elif component in ("waybar", "wofi", "gtk3", "gtk4"):
+    elif component in CSS_COMPONENTS:
         texts[first] = formats.css(text, rendered)
         if component == "waybar":
             configs = [path for path in paths_list[1:] if originals[str(path)]["kind"] != "missing"]
@@ -540,6 +545,25 @@ def load(paths, component):
         raise ValueError(f"Invalid ownership record for {component}: {exc}; preserve it for recovery.") from exc
 
 
+def without_shared(paths, component, states):
+    """The files without content other connected integrations manage in them.
+
+    GTK 3 and Thunar share gtk.css, Sway and swaybg the Sway config: what one of
+    them manages there is not an existing color setting of the other.
+    """
+    result = dict(states)
+    for other in FILES:
+        if other == component or not paths.ownership(other).is_file():
+            continue
+        try:
+            record = load(paths, other)
+            if record and set(record["files"]) & set(states):
+                result.update((name, state) for name, state in rebase(paths, record).items() if name in result)
+        except (OSError, ValueError, UnicodeError):
+            continue  # That integration reports its own problem; its content stays listed here.
+    return result
+
+
 def inspect(paths, component):
     report = {"sources": [], "issues": [], "inputs": [], "has_existing_colors": False,
               "scope": CAPABILITIES[component] + " Later edits to other settings are kept; "
@@ -559,11 +583,13 @@ def inspect(paths, component):
         report["linked_paths"] = [name for name, state in states.items() if state["kind"] == "symlink"]
         if record:
             originals = {**states, **rebase(paths, record)}
+        own = without_shared(paths, component, states) if not record else states
         for name, state in states.items():
             changes.safe_parents(Path(name), root_for(paths, Path(name)))
             report["inputs"].append({"path": name, "fingerprint": changes.digest(state)})
             if record:
                 continue
+            state = own[name]
             if component == "waybar" and name != str(config_paths[0]):
                 continue  # Reload preferences are not color sources.
             if component == "plasma":
@@ -594,7 +620,7 @@ def inspect(paths, component):
             report["has_existing_colors"] |= bool(dependency_report["sources"])
         if component in CSS_COMPONENTS:
             # Imported stylesheets are read-only review dependencies.
-            original = changes.text_of((originals if record else states)[str(config_paths[0])])
+            original = changes.text_of((originals if record else own)[str(config_paths[0])])
             imported, sources, report["notes"] = css_imports(config_paths[0], original)
             report["dependencies"] = [{"path": name, "fingerprint": changes.digest(state)}
                                       for name, state in imported.items()]

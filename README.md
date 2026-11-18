@@ -19,8 +19,8 @@ Choose a palette, inspect components and color sources, review exact changes,
 apply, disconnect, export, undo and recover without configuration commands.
 Selecting an integration explains existing colors and linked configurations before
 review. Technical details are optional; consent never changes files by itself.
-Terminals, bars, launchers, notifications, shells, GTK/Qt and native desktop
-appearance have individually scoped managed integrations. Desktop wallpaper
+Terminals, bars, launchers, notifications, shells, GTK/Qt, the Thunar file manager
+and native desktop appearance have individually scoped managed integrations. Desktop wallpaper
 changes use compatible session adapters; swaybg has a Sway configuration workflow
 for the next manual reload. [Exact capabilities and limits](docs/INTEGRATIONS.md).
 Native Kitty, Alacritty and Waybar watchers are enabled through reviewed settings;
@@ -113,6 +113,7 @@ choices, links, ownership, disconnection and conflicts. The GUI exposes these wo
 | KDE Plasma | Executables, processes, kdeglobals | Application color roles; Shell theme stays as configured |
 | Polybar, Waybar, Rofi, Wofi, Dunst, Mako | Executables, processes, conventional configs | Scoped palette defaults and supported interaction/urgency states |
 | GTK 3, GTK 4/libadwaita, Qt settings | Conventional config files; GTK 3 theme preferences | Separate user CSS/qt5ct+qt6ct palettes; toolkit/application limits apply |
+| Thunar | Executables, processes, its preferences and GTK 3 user CSS | Rules limited to Thunar's windows in `gtk.css`: bars, location bar, side pane, file views, tabs and split view; composes with GTK 3 |
 | zsh, fish | Executables/processes and conventional startup files | Interactive editor/syntax/pager colors; keep prompts |
 | swaybg | Executable/process evidence | Sway image configuration for the next manual reload; keep output layout |
 | Desktop wallpaper | Session-aware, read-only probes | GNOME and derivatives, Plasma Image, Xfce, swww/awww, compatible hyprpaper IPC, X11 feh; see [limits and recovery](docs/WALLPAPER.md) |
