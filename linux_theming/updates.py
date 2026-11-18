@@ -155,9 +155,16 @@ def _private_directory(paths, path):
 
     Downloads, kept copies and probes are executed from here.
     """
-    changes.safe_parents(path / "entry", paths.state)
-    if path.is_symlink():
-        raise UpdateError(f"{path} is a symbolic link. Replace it with a regular folder first.")
+    for folder in (path, *path.parents):
+        if folder == paths.state:
+            break
+        if folder.is_symlink():
+            raise UpdateError(f"{folder} is a symbolic link. Nothing was changed there; replace it with a "
+                              "regular folder first.")
+    try:
+        changes.safe_parents(path / "entry", paths.state)
+    except ValueError as exc:
+        raise UpdateError(str(exc)) from None
     changes.private_parents(path)
     for folder in (directory(paths), path):
         info = os.lstat(folder)
@@ -299,6 +306,14 @@ class _Watch:
                 sockets = list(self.sockets)
             for sock in sockets:
                 self._stop(sock)
+
+    def start_body(self):
+        """Headers arrived: replace the overall deadline by the minimum speed."""
+        with self._lock:
+            if not self.reason:
+                self.deadline = None
+                self._window = (time.monotonic(), self.received)
+                self.speed_floor = True
 
     def _slow(self, now):
         # Measured here, not after each read: a stall inside the HTTP framing can keep a
@@ -546,7 +561,10 @@ def _private_group(gid):
 
 
 def _extended_acl(path):
-    """Whether a POSIX access ACL names users or groups beyond owner, group and other."""
+    """Whether a POSIX access ACL names users or groups beyond owner, group and other.
+
+    ``path`` may also be an open descriptor.
+    """
     try:
         value = os.getxattr(path, "system.posix_acl_access")
     except OSError:
@@ -781,6 +799,14 @@ def _copy_hashed(stream, staged, size, *, progress, cancelled, phase, what="AppI
         fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     except OSError as exc:
         raise UpdateError(f"{staged} cannot be created: {exc.strerror}. Nothing was replaced.") from None
+    # A folder's default ACL is inherited by new files; its named entries would gain
+    # access once the mode widens. Only the owner's mode bits apply to these files.
+    with contextlib.suppress(OSError):
+        os.removexattr(fd, "system.posix_acl_access")
+    if _extended_acl(fd):
+        os.close(fd)
+        os.unlink(staged)
+        raise UpdateError(f"{staged} keeps an access list for other users. Nothing was replaced.")
     read = getattr(stream, "read1", stream.read)  # Returns what has arrived, so cancel is checked often.
     with os.fdopen(fd, "wb") as output:
         written = os.fstat(output.fileno())
@@ -843,11 +869,22 @@ def _same_staged(staged, identity, mode=None):
             os.close(fd)
 
 
+def _private_folder(folder):
+    """A real folder of this user that no one else can use (no exception: for listing)."""
+    try:
+        info = os.lstat(folder)
+    except OSError:
+        return False
+    return stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & 0o077
+
+
 def _kept_records(paths):
     folder = directory(paths) / "previous"
     records = []
+    if not (_private_folder(directory(paths)) and _private_folder(folder)):
+        return records  # Nothing from a folder others could use is offered or read.
     try:
-        candidates = [] if folder.is_symlink() else sorted(folder.glob("LinuxTheming-*.json"))
+        candidates = sorted(folder.glob("LinuxTheming-*.json"))
     except OSError:
         return records
     for record in candidates:
@@ -968,7 +1005,10 @@ def _replace(target, staged, identity):
     Returns the installed file's fingerprint (a rename keeps inode and mtime).
     """
     _unchanged(target)
-    mode = stat.S_IMODE(os.stat(target["path"]).st_mode) | stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR
+    # The original's read and execute bits, never group or other write: the new file may
+    # belong to another group than the original (a setgid folder), so copying its write
+    # bits could let that group change the installed program.
+    mode = stat.S_IMODE(os.stat(target["path"]).st_mode) & 0o755 | stat.S_IRWXU
     _same_staged(staged, identity, mode)
     fingerprint = _fingerprint(staged)
     _unchanged(target)  # As late as possible before the rename.
@@ -987,18 +1027,22 @@ def install(paths, release, target, *, progress=lambda *_: None, cancelled=lambd
         if modifiable_by_others(Path(target["path"]).parent) is not None:
             raise UpdateError(f"The folder of {target['path']} can now be changed by other users. Nothing was changed.")
         _remove_leftovers(target)
+        # Validated before anything in it is listed, cleaned up, read or run.
+        _private_directory(paths, directory(paths) / "previous")
         _remove_scratch(paths)
         _require_space(Path(target["path"]).parent, asset["size"])
         src = source(environ)
         transport = transport or opener(src, environ)
         staged = _staging(target)
         try:
-            with _Watch(cancelled) as watch:
-                watch.speed_floor = True
+            # The answer must start within the metadata deadline; the body then has to
+            # keep the minimum speed instead.
+            with _Watch(cancelled, METADATA_DEADLINE) as watch:
                 try:
                     response = transport.open(_request(asset["url"], "application/octet-stream"), timeout=TIMEOUT)
                 except (OSError, http.client.HTTPException) as exc:
                     raise (watch.stopped("AppImage") or _explain(exc, "AppImage")) from exc
+                watch.start_body()
                 with response:
                     if watch.reason:
                         raise watch.stopped("AppImage")
@@ -1032,7 +1076,7 @@ def restore(paths, target, *, current=__version__, expected=None, progress=lambd
     if target.get("problem") or not target.get("path"):
         raise UpdateError(target.get("problem") or "This copy cannot be replaced.")
     with _locked(paths):
-        # Validated before any kept file is read or run.
+        # Validated before any kept file is listed, read or run.
         _private_directory(paths, directory(paths) / "previous")
         saved = read_previous(paths, current)
         if not saved:
@@ -1044,6 +1088,8 @@ def restore(paths, target, *, current=__version__, expected=None, progress=lambd
         if modifiable_by_others(Path(target["path"]).parent) is not None:
             raise UpdateError(f"The folder of {target['path']} can now be changed by other users. Nothing was changed.")
         _remove_leftovers(target)
+        # Validated before anything in it is listed, cleaned up, read or run.
+        _private_directory(paths, directory(paths) / "previous")
         _remove_scratch(paths)
         _require_space(Path(target["path"]).parent, saved["size"])
         staged = _staging(target)
@@ -1071,6 +1117,7 @@ def restore(paths, target, *, current=__version__, expected=None, progress=lambd
 def discard_previous(paths, *, current=__version__, expected=None):
     """Delete every kept copy; with ``expected``, only if the one offered is still that copy."""
     with _locked(paths):
+        _private_directory(paths, directory(paths) / "previous")
         saved = read_previous(paths, current)
         if expected is not None and any(saved.get(key) != expected.get(key) for key in ("version", "path", "sha256")):
             raise UpdateError("The kept copy changed after you reviewed it. Nothing was deleted; review it again.")

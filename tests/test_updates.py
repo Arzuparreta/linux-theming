@@ -81,7 +81,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         server = self.server
         server.requests.append(self.path)
         tag = "v" + server.version
-        if server.crawl_headers:  # Headers one byte at a time; never reaches the socket timeout.
+        if server.crawl_headers and (server.crawl_headers is True or self.path.endswith(server.crawl_headers)):
+            # Headers one byte at a time; never reaches the socket timeout.
             with contextlib.suppress(OSError):
                 for byte in b"HTTP/1.0 200 OK\r\nX-Slow: " + b"x" * 400:
                     self.wfile.write(bytes([byte]))
@@ -737,6 +738,50 @@ class UpdateTests(unittest.TestCase):
             with patch("linux_theming.updates._extended_acl", side_effect=lambda path: Path(path) == self.apps):
                 self.assertEqual(updates.modifiable_by_others(self.apps), self.apps)
         self.assertFalse(updates._extended_acl(self.apps))
+
+    def test_a_linked_kept_folder_is_refused_before_anything_is_deleted(self):
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir(mode=0o700)
+        important = elsewhere / ".incoming-important"
+        important.write_text("keep me")
+        state = updates.directory(self.paths)
+        state.mkdir(parents=True, mode=0o700)
+        (state / "previous").symlink_to(elsewhere)
+        for operation in (self.install, lambda: updates.restore(self.paths, self.target(), current="9.0.0"),
+                          lambda: updates.discard_previous(self.paths)):
+            with self.assertRaisesRegex(updates.UpdateError, "symbolic link"):
+                operation()
+            self.assertEqual(important.read_text(), "keep me")
+        self.assertEqual(updates.read_previous(self.paths, "9.0.0"), {})
+        self.assertIn(b"old", self.installed.read_bytes()[:16])
+
+    def test_installed_file_never_grants_group_or_other_write(self):
+        self.installed.chmod(0o775)
+        self.install()
+        self.assertEqual(stat.S_IMODE(self.installed.stat().st_mode), 0o755)
+
+    def test_inherited_default_acl_is_removed(self):
+        if not shutil.which("setfacl"):
+            self.skipTest("setfacl is needed to create a default ACL")
+        named = f"u:{os.getuid() + 1}:rwx"
+        if subprocess.run(["setfacl", "-d", "-m", named, str(self.apps)], capture_output=True).returncode:
+            self.skipTest("this filesystem does not support ACLs")
+        probe = self.apps / "acl-probe"
+        probe.touch()
+        self.assertTrue(updates._extended_acl(probe))  # The folder does pass ACLs on.
+        probe.unlink()
+        self.install()
+        self.assertFalse(updates._extended_acl(self.installed))
+        self.assertEqual(stat.S_IMODE(self.installed.stat().st_mode), 0o755)
+
+    def test_download_headers_meet_the_deadline(self):
+        self.server.crawl_headers = NAME
+        started = time.monotonic()
+        with (patch.object(updates, "METADATA_DEADLINE", 0.4),
+              self.assertRaisesRegex(updates.UpdateError, "in time")):
+            self.install(release=self.check())
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual(self.leftovers(), [])
 
     def test_update_state_others_can_use_is_refused(self):
         state = updates.directory(self.paths)

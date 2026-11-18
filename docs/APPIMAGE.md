@@ -204,7 +204,9 @@ SHA-256 first. The engine (`linux_theming/updates.py`) then:
    way, with a checksum record beside it. Older kept copies are deleted only after
    the replacement is committed; after an interruption both remain, and the one
    that differs from the installed version is offered.
-5. Replaces the AppImage by rename in the same folder. A file changed, moved or
+5. Replaces the AppImage by rename in the same folder. The new file keeps the
+   original's read and execute permissions but never group or other write, and
+   access lists inherited from the folder are removed. A file changed, moved or
    replaced since the check is never overwritten; reopening the dialog after such
    a change, or a refused install, withdraws the offer until the next check.
 
@@ -214,7 +216,7 @@ about half a second: each connection is shut down, even mid-read, including one
 still connecting. Name resolution itself cannot be interrupted and is bounded by
 the system resolver. A verification probe is stopped with every process in its
 group, escalating to SIGKILL, which can take up to 10 seconds. Release
-information must arrive within 60 seconds, and a download slower than about
+information, and the start of the download's answer, must arrive within 60 seconds, and a download slower than about
 1 KB/s for a whole minute stops with an explanation, so a stalled server can never
 keep the application from closing. If the rename succeeded but could not be
 synchronised to disk, both versions are kept.
