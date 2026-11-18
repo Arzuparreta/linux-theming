@@ -240,8 +240,10 @@ class _Watch:
     one still receiving headers.
     """
 
-    def __init__(self, cancelled=lambda: False, seconds=None):
+    def __init__(self, cancelled=lambda: False, seconds=None, name="GitHub"):
         self.cancelled = cancelled
+        self.name = name  # The source, as people should read it in messages.
+        self.body_started = False
         self.deadline = None if seconds is None else time.monotonic() + seconds
         self.sockets, self.reason = [], ""
         self.speed_floor = False  # Set for downloads: stop below SLOW_BYTES per SLOW_WINDOW.
@@ -312,6 +314,7 @@ class _Watch:
         with self._lock:
             if not self.reason:
                 self.deadline = None
+                self.body_started = True
                 self._window = (time.monotonic(), self.received)
                 self.speed_floor = True
 
@@ -333,7 +336,10 @@ class _Watch:
             return UpdateError("The download is too slow to finish (under 1 KB/s for a minute). "
                                "Nothing was replaced; try again later.")
         if self.reason == "deadline":
-            return UpdateError(f"GitHub did not finish sending the {what} in time. Try again later.")
+            if what == "AppImage" and not self.body_started:
+                return UpdateError(f"The download from {self.name} did not start in time. Nothing was replaced; "
+                                   "try again later.")
+            return UpdateError(f"{self.name} did not finish sending the {what} in time. Try again later.")
         return None
 
 
@@ -427,8 +433,12 @@ def _explain(exc, what):
     return UpdateError(f"GitHub could not be reached for the {what}: {reason}. Check the connection and try again.")
 
 
-def _fetch(transport, url, limit, *, accept, what, cancelled=lambda: False):
-    with _Watch(cancelled, METADATA_DEADLINE) as watch:
+def source_name(src):
+    return urllib.parse.urlsplit(src.mirror).hostname if src.mirror else "GitHub"
+
+
+def _fetch(transport, url, limit, *, accept, what, cancelled=lambda: False, name="GitHub"):
+    with _Watch(cancelled, METADATA_DEADLINE, name) as watch:
         try:
             with transport.open(_request(url, accept), timeout=TIMEOUT) as response:
                 if watch.reason:
@@ -459,7 +469,7 @@ def check(*, current=__version__, machine=None, environ=None, transport=None, ca
     src = source(environ)
     transport = transport or opener(src, environ)
     raw = _fetch(transport, src.api, METADATA_LIMIT, accept="application/vnd.github+json",
-                 what="release information", cancelled=cancelled)
+                 what="release information", cancelled=cancelled, name=source_name(src))
     try:
         release = json.loads(raw)
     except ValueError:
@@ -493,7 +503,7 @@ def check(*, current=__version__, machine=None, environ=None, transport=None, ca
     if name + ".sha256" not in assets:
         raise UpdateError(f"Release {tag} has no {name}.sha256 checksum file; it was not used.")
     text = _fetch(transport, url + ".sha256", CHECKSUM_LIMIT, accept="application/octet-stream",
-                  what="checksum file", cancelled=cancelled).decode("ascii", "replace").strip()
+                  what="checksum file", cancelled=cancelled, name=source_name(src)).decode("ascii", "replace").strip()
     match = CHECKSUM_LINE.fullmatch(text)
     if not match or match.group(2) != name:
         raise UpdateError(f"The checksum file of release {tag} does not describe {name}.")
@@ -904,6 +914,15 @@ def _kept_records(paths):
     return sorted(records, key=lambda item: str(item["saved"]), reverse=True)
 
 
+def kept_folder_problem(paths):
+    """Why kept copies are not offered although their folder exists, or ""."""
+    for folder in (directory(paths), directory(paths) / "previous"):
+        if (folder.exists() or folder.is_symlink()) and not _private_folder(folder):
+            return (f"Kept copies are not offered because {folder} is a link or can be used by other users. "
+                    f"Make it a private folder of yours (chmod 700 '{folder}') to see them again.")
+    return ""
+
+
 def read_previous(paths, current=__version__):
     """The most recently kept copy of a version other than the one installed, if intact.
 
@@ -1037,7 +1056,7 @@ def install(paths, release, target, *, progress=lambda *_: None, cancelled=lambd
         try:
             # The answer must start within the metadata deadline; the body then has to
             # keep the minimum speed instead.
-            with _Watch(cancelled, METADATA_DEADLINE) as watch:
+            with _Watch(cancelled, METADATA_DEADLINE, source_name(src)) as watch:
                 try:
                     response = transport.open(_request(asset["url"], "application/octet-stream"), timeout=TIMEOUT)
                 except (OSError, http.client.HTTPException) as exc:

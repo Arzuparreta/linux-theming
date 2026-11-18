@@ -608,6 +608,19 @@ class UpdateDialogTests(unittest.TestCase):
                 focused = self.window.property("activeFocusItem")
                 self.assertEqual(focused.property("text"), "Cancel", trigger)
 
+    def test_a_kept_folder_others_can_use_is_explained(self):
+        folder = updates.directory(self.paths) / "previous"
+        folder.mkdir(parents=True)
+        updates.directory(self.paths).chmod(0o700)
+        folder.chmod(0o777)
+        self.open()
+        self.assertTrue(self.visible("keptError"))
+        self.assertIn(f"chmod 700 '{folder}'", self.update["keptError"])
+        folder.chmod(0o700)
+        self.window.findChild(QObject, "updateDialog").close()
+        self.open()
+        self.assertFalse(self.visible("keptError"))
+
     def test_check_again_replaces_an_old_offer(self):
         self.available()
         with patch("linux_theming.updates.check", return_value=dict(RELEASE, version="9.1.0")):

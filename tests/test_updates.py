@@ -753,6 +753,7 @@ class UpdateTests(unittest.TestCase):
                 operation()
             self.assertEqual(important.read_text(), "keep me")
         self.assertEqual(updates.read_previous(self.paths, "9.0.0"), {})
+        self.assertIn("chmod 700", updates.kept_folder_problem(self.paths))
         self.assertIn(b"old", self.installed.read_bytes()[:16])
 
     def test_installed_file_never_grants_group_or_other_write(self):
@@ -778,7 +779,7 @@ class UpdateTests(unittest.TestCase):
         self.server.crawl_headers = NAME
         started = time.monotonic()
         with (patch.object(updates, "METADATA_DEADLINE", 0.4),
-              self.assertRaisesRegex(updates.UpdateError, "in time")):
+              self.assertRaisesRegex(updates.UpdateError, "download from 127.0.0.1 did not start in time")):
             self.install(release=self.check())
         self.assertLess(time.monotonic() - started, 5)
         self.assertEqual(self.leftovers(), [])

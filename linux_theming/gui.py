@@ -404,7 +404,8 @@ class Controller(QObject):
             self._update_release, self._offer_target = None, {}
             stale = {"status": "idle", "notice": "The AppImage changed after the last check. Check again."}
         self.publish_update(path=target["path"], problem=target["problem"], previous=self.previous_update(),
-                            automatic=preference["automatic"], lastCheck=preference["last_check"], **stale)
+                            automatic=preference["automatic"], lastCheck=preference["last_check"],
+                            keptError=updates.kept_folder_problem(self.paths), **stale)
 
     @Slot()
     def checkForUpdates(self, automatic=False):
@@ -533,7 +534,8 @@ class Controller(QObject):
         if not self.same_kept(updates.read_previous(self.paths, current), reviewed):
             self._update_retry = "check" if retry else self._update_retry
             self.publish_update(previous=self.previous_update(),
-                                keptError="The kept copy changed after it was shown. Review it again.")
+                                keptError=updates.kept_folder_problem(self.paths)
+                                or "The kept copy changed after it was shown. Review it again.")
             return
         self._update_retry = "restore"
         self._restore_approved = dict(reviewed)
