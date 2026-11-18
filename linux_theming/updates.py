@@ -293,16 +293,18 @@ class _Watch:
         # (a redirect, or one still resolving or connecting) is stopped too.
         while not self._done.wait(0.1):
             if not self.reason:
-                now = time.monotonic()
-                if self.cancelled():
-                    reason = "cancelled"
-                elif self.deadline is not None and now > self.deadline:
-                    reason = "deadline"
-                elif self.speed_floor and self._slow(now):
-                    reason = "slow"
-                else:
-                    continue
+                cancelled = self.cancelled()  # Outside the lock: it may take its own.
                 with self._lock:
+                    # One consistent view: start_body() changes these under the same lock.
+                    now, deadline = time.monotonic(), self.deadline
+                    if cancelled:
+                        reason = "cancelled"
+                    elif deadline is not None and now > deadline:
+                        reason = "deadline"
+                    elif self.speed_floor and self._slow(now):
+                        reason = "slow"
+                    else:
+                        continue
                     self.reason = reason
             with self._lock:
                 sockets = list(self.sockets)
@@ -413,24 +415,24 @@ def _request(url, accept):
                                                 "User-Agent": f"linux-theming/{__version__}"})
 
 
-def _explain(exc, what):
+def _explain(exc, what, name="GitHub"):
     if isinstance(exc, UpdateError):
         return exc
     if isinstance(exc, urllib.error.HTTPError):
         remaining, reset = exc.headers.get("X-RateLimit-Remaining"), exc.headers.get("X-RateLimit-Reset")
         if exc.code in (403, 429) and remaining == "0" and (reset or "").isdigit():
             when = datetime.fromtimestamp(int(reset)).astimezone().strftime("%H:%M")
-            return UpdateError(f"GitHub's limit for checks from this network was reached. Try again after {when}.")
+            return UpdateError(f"{name}'s limit for checks from this network was reached. Try again after {when}.")
         if exc.code == 404:
-            return UpdateError(f"GitHub has no published {what} at {exc.url}.")
-        return UpdateError(f"GitHub answered HTTP {exc.code} for the {what}. Try again later.")
+            return UpdateError(f"{name} has no published {what} at {exc.url}.")
+        return UpdateError(f"{name} answered HTTP {exc.code} for the {what}. Try again later.")
     reason = getattr(exc, "reason", exc)
     if isinstance(reason, ssl.SSLCertVerificationError):
-        return UpdateError("The secure connection to GitHub could not be verified "
+        return UpdateError(f"The secure connection to {name} could not be verified "
                            f"({reason.verify_message}). Check this computer's date and certificate store.")
     if isinstance(reason, TimeoutError) or "timed out" in str(reason):
-        return UpdateError(f"GitHub did not answer within {TIMEOUT} seconds. Check the connection and try again.")
-    return UpdateError(f"GitHub could not be reached for the {what}: {reason}. Check the connection and try again.")
+        return UpdateError(f"{name} did not answer within {TIMEOUT} seconds. Check the connection and try again.")
+    return UpdateError(f"{name} could not be reached for the {what}: {reason}. Check the connection and try again.")
 
 
 def source_name(src):
@@ -453,7 +455,7 @@ def _fetch(transport, url, limit, *, accept, what, cancelled=lambda: False, name
                         break
                     data += block
         except (OSError, http.client.HTTPException) as exc:
-            raise (watch.stopped(what) or _explain(exc, what)) from exc
+            raise (watch.stopped(what) or _explain(exc, what, name)) from exc
         stopped = watch.stopped(what)
     if stopped:
         raise stopped
@@ -473,9 +475,9 @@ def check(*, current=__version__, machine=None, environ=None, transport=None, ca
     try:
         release = json.loads(raw)
     except ValueError:
-        raise UpdateError("GitHub returned release information that is not valid JSON.") from None
+        raise UpdateError(f"{source_name(src)} returned release information that is not valid JSON.") from None
     if not isinstance(release, dict) or not isinstance(release.get("tag_name"), str):
-        raise UpdateError("GitHub's release information has no version tag.")
+        raise UpdateError(f"{source_name(src)}'s release information has no version tag.")
     tag = release["tag_name"]
     if not TAG.fullmatch(tag):
         raise UpdateError(f"The latest release tag {tag!r} is not a stable vX.Y.Z version.")
@@ -512,7 +514,7 @@ def check(*, current=__version__, machine=None, environ=None, transport=None, ca
     if digest is not None:  # Even from a mirror, a contradiction is never ignored.
         published = DIGEST.fullmatch(digest) if isinstance(digest, str) else None
         if not published or published.group(1) != checksum:
-            raise UpdateError(f"GitHub's checksum for {name} differs from the release's checksum "
+            raise UpdateError(f"{source_name(src)}'s asset digest for {name} differs from the release's checksum "
                               "file. It was not used.")
     # Only GitHub's own API can confirm the checksum file independently; a mirror
     # supplies both values itself.
@@ -834,7 +836,7 @@ def _copy_hashed(stream, staged, size, *, progress, cancelled, phase, what="AppI
                 if watch is not None and watch.stopped(what):
                     raise watch.stopped(what) from None
                 if network:
-                    raise _explain(exc, what) from exc
+                    raise _explain(exc, what, watch.name if watch is not None else "GitHub") from exc
                 raise UpdateError(f"The {what} cannot be read: {exc}. Nothing was replaced.") from exc
             if not block:
                 if cancelled():  # A cancel that shut the connection down ends the read with EOF.
@@ -1066,7 +1068,7 @@ def install(paths, release, target, *, progress=lambda *_: None, cancelled=lambd
                 try:
                     response = transport.open(_request(asset["url"], "application/octet-stream"), timeout=TIMEOUT)
                 except (OSError, http.client.HTTPException) as exc:
-                    raise (watch.stopped("AppImage") or _explain(exc, "AppImage")) from exc
+                    raise (watch.stopped("AppImage") or _explain(exc, "AppImage", watch.name)) from exc
                 watch.start_body()
                 with response:
                     if watch.reason:

@@ -375,6 +375,38 @@ class UpdateTests(unittest.TestCase):
             updates.check(current="8.0.0", machine="x86_64", environ=environ)
         self.assertLess(time.monotonic() - started, 3)
 
+    def test_the_watcher_survives_headers_arriving_during_its_check(self):
+        # start_body() clears the deadline; the watcher must read it once, under its lock,
+        # or a transition between two reads compares a time with None and the watcher dies.
+        class Racing(updates._Watch):
+            reads = 0
+
+            @property
+            def deadline(self):
+                self.reads += 1
+                return time.monotonic() + 60 if self.reads % 2 else None
+
+            @deadline.setter
+            def deadline(self, _value):
+                pass
+        stop = {"now": False}
+        left, right = socket.socketpair()
+        self.addCleanup(left.close)
+        self.addCleanup(right.close)
+        with Racing(lambda: stop["now"], 60) as watch:
+            watch.register(left)
+            time.sleep(0.5)  # Many evaluations, alternating deadline values.
+            self.assertTrue(watch._thread.is_alive())
+            stop["now"] = True
+            right.settimeout(5)
+            self.assertEqual(right.recv(1), b"")  # Shut down: the peer sees EOF.
+        self.assertEqual(watch.reason, "cancelled")
+
+    def test_errors_name_the_configured_source(self):
+        self.server.status = 404
+        with self.assertRaisesRegex(updates.UpdateError, "127.0.0.1 has no published release information"):
+            self.check()
+
     def test_cancel_and_commit_exclude_each_other(self):
         cancellation = updates.Cancellation()
         self.assertTrue(cancellation.commit())
