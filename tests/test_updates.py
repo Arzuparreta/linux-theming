@@ -719,6 +719,40 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual((foreign.read_text(), notes.read_text(), lookalike.read_text()), ("not ours", "mine", "mine"))
         self.assertEqual(updates.read_previous(self.paths, "8.0.0"), {})
 
+    def test_scratch_cleanup_keeps_entries_it_did_not_create(self):
+        state = updates.directory(self.paths)
+        (state / "previous").mkdir(parents=True, mode=0o700)
+        state.chmod(0o700)
+        photos = state / "probe-photos"
+        photos.mkdir()
+        (photos / "photo.txt").write_text("mine")
+        unmarked = state / "probe-abcd1234"  # A probe-like name without the updater's marker.
+        unmarked.mkdir()
+        (unmarked / "data").write_text("mine")
+        important = state / "previous/.incoming-important"
+        important.write_text("mine")
+        left_probe = state / "probe-zz9_ab12"
+        left_probe.mkdir()
+        (left_probe / updates.PROBE_MARKER).touch()
+        left_copy = state / "previous/.incoming-0123456789ab"
+        left_copy.write_bytes(b"partial")
+        self.install()
+        updates.restore(self.paths, self.target(), current="9.0.0")
+        self.assertEqual((photos / "photo.txt").read_text(), "mine")
+        self.assertEqual((unmarked / "data").read_text(), "mine")
+        self.assertEqual(important.read_text(), "mine")
+        self.assertFalse(left_probe.exists())
+        self.assertFalse(left_copy.exists())
+
+    def test_hidden_kept_copies_are_explained(self):
+        self.install()
+        self.assertEqual(updates.kept_folder_problem(self.paths), "")
+        state = self.paths.state / "linux-theming"
+        moved = self.root / "moved-state"
+        os.replace(state, moved)
+        state.symlink_to(moved)
+        self.assertIn("is a symbolic link. Replace it with a regular folder", updates.kept_folder_problem(self.paths))
+
     def test_a_kept_copy_started_directly_is_not_updated_or_deleted(self):
         self.install()
         kept = Path(updates.read_previous(self.paths, "9.0.0")["path"])
@@ -840,7 +874,7 @@ class UpdateTests(unittest.TestCase):
                 operation()
             self.assertEqual(important.read_text(), "keep me")
         self.assertEqual(updates.read_previous(self.paths, "9.0.0"), {})
-        self.assertIn("chmod 700", updates.kept_folder_problem(self.paths))
+        self.assertIn("is a symbolic link", updates.kept_folder_problem(self.paths))
         self.assertIn(b"old", self.installed.read_bytes()[:16])
 
     def test_kept_copies_under_a_linked_state_folder_are_not_offered(self):

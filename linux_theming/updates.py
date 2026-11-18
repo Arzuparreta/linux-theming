@@ -736,6 +736,7 @@ def program_version(path, *, extract_and_run=False, scratch=None, timeout=PROBE_
     # answered; a cleanup failure must not turn a verified answer into an error.
     with tempfile.TemporaryDirectory(prefix="probe-", dir=scratch, ignore_cleanup_errors=True) as temporary:
         root = Path(temporary)
+        (root / PROBE_MARKER).touch()  # Lets a later cleanup recognise it as this module's.
         env = {key: value for key, value in child_environment().items() if key in PROBE_VARIABLES}
         env.update(HOME=str(root), XDG_CONFIG_HOME=str(root / "config"), XDG_DATA_HOME=str(root / "data"),
                    XDG_STATE_HOME=str(root / "state"), XDG_CACHE_HOME=str(root / "cache"))
@@ -952,11 +953,24 @@ def _kept_records(paths):
 
 
 def kept_folder_problem(paths):
-    """Why kept copies are not offered although their folder exists, or ""."""
-    for folder in (directory(paths), directory(paths) / "previous"):
-        if (folder.exists() or folder.is_symlink()) and not _private_folder(folder):
-            return (f"Kept copies are not offered because {folder} is a link or can be used by other users. "
-                    f"Make it a private folder of yours (chmod 700 '{folder}') to see them again.")
+    """Why kept copies are not offered although their folder exists, or "" (the same rules as
+    _kept_records)."""
+    folder = directory(paths) / "previous"
+    for parent in [folder, *folder.parents]:
+        if parent == paths.state or not parent.is_relative_to(paths.state):
+            break
+        if parent.is_symlink():
+            return (f"Kept copies are not offered because {parent} is a symbolic link. Replace it with a "
+                    "regular folder of yours, moving its contents there, to see them again.")
+    for candidate in (directory(paths), folder):
+        if candidate.exists() and not _private_folder(candidate):
+            return (f"Kept copies are not offered because {candidate} can be used by other users or is not "
+                    f"your own folder. Make it private (chmod 700 '{candidate}') to see them again.")
+    if folder.exists():
+        shared = modifiable_by_others(folder)
+        if shared is not None:
+            return (f"Kept copies are not offered because {shared} can be changed by other users, so the "
+                    "copies there could be swapped.")
     return ""
 
 
@@ -1016,14 +1030,27 @@ def _commit_previous(paths, record):
     changes.sync_directory(folder)
 
 
+PROBE_MARKER = ".linux-theming-probe"
+PROBE_NAME = re.compile(r"probe-[a-z0-9_]{8}")  # tempfile's names for the "probe-" prefix.
+INCOMING_NAME = re.compile(r"\.incoming-[0-9a-f]{12}")
+
+
 def _remove_scratch(paths):
-    """Probe directories left by an interrupted update (an unpacked payload can be large)."""
+    """Probe folders and partial copies left by an interrupted update (an unpacked payload can
+    be large). Only entries with this module's exact names, owned by this user, and for probe
+    folders carrying its marker, are removed; anything else stays."""
+    me = os.getuid()
     for leftover in directory(paths).glob("probe-*"):
-        if leftover.is_dir() and not leftover.is_symlink():
-            shutil.rmtree(leftover, ignore_errors=True)
+        with contextlib.suppress(OSError):
+            info = leftover.lstat()
+            if (PROBE_NAME.fullmatch(leftover.name) and stat.S_ISDIR(info.st_mode) and info.st_uid == me
+                    and (leftover / PROBE_MARKER).is_file() and not (leftover / PROBE_MARKER).is_symlink()):
+                shutil.rmtree(leftover, ignore_errors=True)
     for leftover in (directory(paths) / "previous").glob(".incoming-*"):
         with contextlib.suppress(OSError):
-            leftover.unlink()
+            info = leftover.lstat()
+            if INCOMING_NAME.fullmatch(leftover.name) and stat.S_ISREG(info.st_mode) and info.st_uid == me:
+                leftover.unlink()
 
 
 def _commit(paths, target, staged, identity, previous, cancelled):
