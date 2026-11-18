@@ -78,6 +78,8 @@ jobs:
           grep '^PASS:' "$RUNNER_TEMP/x11-smoke.log"
       - name: Exercise real wallpaper apply and undo on a private Xvfb
         run: APPIMAGE_EXTRACT_AND_RUN=1 dist/LinuxTheming-x86_64.AppImage --smoke-test-wallpaper
+      - name: Exercise the update flow against a loopback release
+        run: APPIMAGE_EXTRACT_AND_RUN=1 dist/LinuxTheming-x86_64.AppImage --smoke-test-update
       - name: Exercise bundled QML and engine in temporary HOME/XDG
         run: |
           APPIMAGE_EXTRACT_AND_RUN=1 dist/LinuxTheming-x86_64.AppImage --smoke-test
@@ -120,6 +122,12 @@ jobs:
           Target: x86_64 Linux, glibc 2.35+ (Ubuntu 22.04 build base).
           FUSE is required for normal mounting; APPIMAGE_EXTRACT_AND_RUN=1 is the fallback.
           The accompanying .sha256 file verifies the download.
+
+          From 0.9.0, ⋯ → Check for updates… updates the AppImage from these
+          releases when you choose to. Downloads are verified against the .sha256
+          file and GitHub's digest and started once in a temporary profile before
+          replacing the file; the replaced version is kept to switch back.
+          Automatic checking is opt-in. Earlier versions need one manual download.
 
           Automatic color updates use Kitty, Alacritty and Waybar's native
           configuration watchers, enabled through reviewed reversible settings.

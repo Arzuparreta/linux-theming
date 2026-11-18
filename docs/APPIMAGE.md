@@ -5,7 +5,7 @@ Pillow, PySide6, Qt libraries/QML modules and platform plugins. It uses the host
 PATH and HOME/XDG directories without a broker or sandbox. Desktop discovery only reads configuration; desktop changes still require review
 and approval in the GUI. Choosing an image or folder saves only navigation state.
 Running an AppImage does not install packages, a second copy or a background
-service. Optional **⋯ → Menu entry and shortcut… → Add to menu…** registers a reviewed, reversible
+service. Updating it is a separate, explicit action: see [Updates](#updates). Optional **⋯ → Menu entry and shortcut… → Add to menu…** registers a reviewed, reversible
 per-user application-menu entry. It starts the existing AppImage at its stable
 path and assigns no keyboard shortcut. [Daily access and repair](GUI.md#application-menu-and-shortcuts)
 describe the explicit workflow. Local and release AppImages use the same HOME/XDG profile and history.
@@ -173,6 +173,101 @@ Upstream references: [AppImage concepts](https://docs.appimage.org/introduction/
 [compatibility practices](https://docs.appimage.org/reference/best-practices.html),
 and [Qt deployment with PyInstaller](https://doc.qt.io/qtforpython-6/deployment/deployment-pyinstaller.html).
 
+## Updates
+
+**⋯ → Check for updates…** compares the running version with the latest stable
+GitHub Release of this repository. Nothing is contacted until **Check now** is
+chosen, or the opt-in **Check for updates when Linux Theming starts** setting is
+on (off by default; at most one check a day, 15 seconds after start). A check
+downloads release metadata and the small `.sha256` file only. Checks send an
+anonymous `User-Agent: linux-theming/<version>` to `api.github.com` and
+`github.com`; no other data is sent. Automatic checks never download or install,
+and their failures are not shown as errors.
+
+**Download and install** shows the file it replaces, the download size and its
+SHA-256 first. The engine (`linux_theming/updates.py`) then:
+
+1. Downloads into a hidden `.LinuxTheming-x86_64.AppImage.*.download` file in
+   the same folder as the AppImage, with the exact size from the release.
+2. Requires the SHA-256 from the release's `.sha256` file to match, and also
+   GitHub's own asset digest when GitHub provides one. The download address is
+   built from the release tag; release metadata cannot redirect it to another
+   host, and redirects to plain HTTP are refused.
+3. Checks the type 2 AppImage header and starts the new program once with
+   `--version` in a temporary HOME/XDG, with only PATH, locale and library
+   variables and no display, D-Bus or agent endpoint; it must report the release
+   version. This limits accidental contact with the desktop; it is not a sandbox.
+   The verified file's identity is checked again before it runs and before the
+   rename, so different bytes put at its name are refused.
+4. Copies the AppImage being replaced to
+   `$XDG_STATE_HOME/linux-theming/updates/previous/` (private), verified the same
+   way, with a checksum record beside it. Older kept copies are deleted only after
+   the replacement is committed; after an interruption both remain, and the one
+   that differs from the installed version is offered.
+5. Replaces the AppImage by rename in the same folder. The new file keeps the
+   original's read and execute permissions but never group or other write, and
+   access lists inherited from the folder are removed. A file changed, moved or
+   replaced since the check is never overwritten; reopening the dialog after such
+   a change, or a refused install, withdraws the offer until the next check.
+
+**Cancel** is honoured until the replacement begins; from then on it is refused, so
+"Cancelling…" is never shown for an update that completes. Network waits stop within
+about half a second: each connection is shut down, even mid-read, including one
+still connecting. Name resolution itself cannot be interrupted and is bounded by
+the system resolver. A verification probe is stopped with every process in its
+group, escalating to SIGKILL, which can take up to 10 seconds. Release
+information, and the start of the download's answer, must arrive within 60 seconds, and a download slower than about
+1 KB/s for a whole minute stops with an explanation, so a stalled server can never
+keep the application from closing. If the rename succeeded but could not be
+synchronised to disk, both versions are kept.
+
+Running windows keep their original file until they restart. **Restart now** waits
+until this process has exited, so the single-instance endpoint and the AppImage
+mount are released, then starts the new file with the same view. **Switch to
+X.Y.Z…** restores the kept copy through the same verification, keeping the
+replaced version in turn; it is also available before restarting, to undo an
+update that has not been used yet. **Delete copy** removes it. A failed, cancelled or
+interrupted update leaves the AppImage untouched when it stops before the rename;
+after the rename the new version is installed and both versions are kept.
+Leftover downloads are removed by the next update. Only files with the names the
+updater creates are ever deleted. A kept copy started directly from the update
+state folder is not updated; copy it to a folder such as `~/Applications` first. Switching uses the kept copy
+shown in the dialog; if another window replaced it meanwhile, nothing is switched. Theme profiles, history and menu entries are not changed:
+the menu entry keeps working because the path stays the same.
+
+An AppImage is not updated, and the release page is offered instead, when it was
+not started as an AppImage (source checkouts), is reached through a symbolic link,
+belongs to another user, is in a folder you cannot write (for example `/opt`
+installed by an administrator or package manager), or when another user could
+change any folder that decides where it resolves: its folder, every folder above
+it, and folders holding symbolic links on the way (writable by others, by a shared
+group, or by users named in an ACL, without the sticky bit), or owns a symbolic
+link on the way. The update state
+folder, its `previous/` folder and every kept copy must be private to you as well,
+because kept copies are run from there; this is checked before any is read or run. It is also not updated when the file was replaced outside the running
+window, because the version it contains is then unknown; restart first. Nothing runs as root.
+
+The SHA-256 checks protect against corrupted or truncated downloads and against
+metadata pointing elsewhere. They establish the same trust as downloading the
+release manually from GitHub: they do not protect against someone who controls
+this repository's releases. Releases are never replaced (see below).
+Versions before 0.9.0 have no updater; download 0.9.0 or later manually once.
+
+Diagnostics:
+
+```sh
+# Loopback release of this AppImage: check, rejected corrupt download, verified
+# install, kept copy and restore, all in temporary HOME/XDG. --network adds one
+# read-only check against GitHub, which verifies TLS with this computer's certificates.
+TMPDIR="$PWD/build/smoke-tmp" dist/LinuxTheming-x86_64.AppImage --smoke-test-update --network
+```
+
+`LINUX_THEMING_UPDATE_URL` replaces the GitHub source for testing or a mirror
+with the same layout (`/releases/latest`, `/releases/download/vX.Y.Z/<asset>`).
+It must be `https://`, or `http://` on 127.0.0.1, ::1 or localhost. The dialog then
+names that source. Its checksums come from the same source as the download, so they
+are never presented as confirmed by GitHub; use only a source you trust.
+
 ## GitHub Releases
 
 The **AppImage** workflow still builds and smoke-tests artifacts on pushes and
@@ -196,6 +291,8 @@ To cut a release:
    asset to verify host graphics initialization.
    Run `--smoke-test-feh` when feh is installed. With feh, xprop and Xvfb available,
    run `--smoke-test-wallpaper` for apply/undo on its own private display.
+   Run `--smoke-test-update --network` to verify the update flow and confirm that
+   GitHub now reports the new tag as the latest release.
 4. Report the public release URL and verification results.
 
 The workflow rejects dispatches from other branches, version mismatches and

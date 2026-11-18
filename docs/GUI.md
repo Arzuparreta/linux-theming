@@ -34,8 +34,10 @@ or restores. It holds **Discard**, **Undo last apply…** and **Review and apply
 **Review and apply** is the primary action only when something is pending; on
 first use **Choose applications** leads to the next step instead.
 The header shows the current session, **Check desktop again** (Ctrl+R) and a
-**⋯** menu with **Export theme file…**, **Menu entry and shortcut…** and
-**Keyboard shortcuts** (F1).
+**⋯** menu with **Export theme file…**, **Menu entry and shortcut…**,
+**Check for updates…** and **Keyboard shortcuts** (F1). When an opt-in daily check
+finds a release, or an installed update awaits a restart, the header shows
+**Update X.Y.Z** or **Restart to update**. See [AppImage updates](APPIMAGE.md#updates).
 
 After a theme has been applied, opening the app starts a **quick theme change**:
 the Theme page with the search field focused, where Escape closes the window

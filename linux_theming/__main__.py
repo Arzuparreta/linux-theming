@@ -11,6 +11,7 @@ USAGE = """Usage: linux-theming [--quick | --center]
   --measure-startup  print timing milestones in an isolated diagnostic fixture
   --performance-probe  lab-only probe (see docs/PERFORMANCE.md)
   --version  print the source version
+  --smoke-test-update [--network]  diagnose updates against a loopback release
 
 Without either option, the daily view opens once a theme has been applied and the
 control center opens on first use. Starting it again in the same session brings
@@ -56,6 +57,10 @@ def main():
     if "--help" in arguments or "-h" in arguments:
         print(USAGE, end="")
         return 0
+    if "--smoke-test-update" in arguments:
+        from .smoke_update import run
+
+        return run(network="--network" in arguments)
     if '--smoke-test-wallpaper' in arguments or '--smoke-test-feh' in arguments:
         from .smoke_wallpaper import run
 
@@ -169,6 +174,9 @@ def main():
     delete(engine)
     if temporary is not None:
         temporary.cleanup()
+    relaunch = getattr(controller, "relaunch", None)
+    if relaunch is not None:
+        relaunch()  # Last: the updated copy starts once this process has exited.
     return result
 
 

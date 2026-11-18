@@ -52,6 +52,12 @@ reversible application-menu registration at its current stable path. Copy the
 command there to choose a shortcut in your desktop settings. No key binding,
 autostart or background service is installed. [Daily workflow and shortcuts](docs/GUI.md#daily-use).
 
+**⋯ → Check for updates…** updates the AppImage from GitHub Releases when you
+choose to: the download is verified against the release checksums and started
+once in a temporary profile before it replaces the file, and the previous version
+is kept so you can switch back. Checking automatically is opt-in.
+[How updates work](docs/APPIMAGE.md#updates).
+
 **Desktop wallpaper** (under **Apply to**) is on by default for a new profile; turn it off
 to use only the image’s palette. Your choice is kept when switching images.
 Choose a folder to browse its images in a persistent list with small thumbnails.

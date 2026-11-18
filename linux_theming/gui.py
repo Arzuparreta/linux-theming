@@ -3,6 +3,7 @@
 import copy
 import os
 import random
+import sys
 from pathlib import Path
 
 import shiboken6
@@ -30,6 +31,7 @@ from . import (
     presentation,
     service,
     theme,
+    updates,
     wallpaper,
 )
 from .paths import Paths
@@ -52,6 +54,35 @@ class Work(QRunnable):
             self.signals.finished.emit(None, str(exc) or type(exc).__name__)
 
 
+class UpdateSignals(QObject):
+    progress = Signal(str, int, int)
+    finished = Signal(object, str)
+
+
+class UpdateWork(QRunnable):
+    """Network and file work for updates, cancellable between blocks."""
+
+    def __init__(self, operation):
+        super().__init__()
+        self.operation = operation
+        self.signals = UpdateSignals()
+        self.cancel = updates.Cancellation()
+        self._reported = None
+
+    def report(self, phase, done, total):
+        # About one notification per percent, never one per network block.
+        step = (phase, done * 100 // total if total else -1)
+        if step != self._reported:
+            self._reported = step
+            self.signals.progress.emit(phase, done, total)
+
+    def run(self):
+        try:
+            self.signals.finished.emit(self.operation(self), "")
+        except Exception as exc:
+            self.signals.finished.emit(exc, str(exc) or type(exc).__name__)
+
+
 class Controller(QObject):
     changed = Signal()
     overviewChanged = Signal()
@@ -69,6 +100,21 @@ class Controller(QObject):
         self.preview_pool.setMaxThreadCount(1)
         self.read_pool = QThreadPool(self)
         self.read_pool.setMaxThreadCount(2)
+        # Updates never wait for, or block, theme work.
+        self.update_pool = QThreadPool(self)
+        self.update_pool.setMaxThreadCount(1)
+        self._update_work = None
+        self._update_release = None
+        self._update_target = {}
+        self._offer_target = {}  # The AppImage as it was when the offered release was checked.
+        self._update_retry = ""
+        self._restore_from = ""  # Update status when a switch to the kept copy started.
+        self._restore_approved = {}  # The kept copy the person confirmed switching to.
+        # The AppImage file this window can vouch for, and the version in it: the one
+        # started, then whatever this window installed. Any other change to the file
+        # makes its version unknown here; nothing is offered until a restart.
+        self._disk = {"fingerprint": updates.installation().get("fingerprint"), "version": updates.__version__}
+        self.relaunch_arguments = None
         self._revision = 0
         self._preview_work = None
         self._pending_preview = None
@@ -88,7 +134,8 @@ class Controller(QObject):
                        "launcher": {}, "shortcut": "", "migration": migration.status(self.paths),
                        "overview": {"components": [], "history": [], "session": {"desktop": "Unknown", "type": "unknown"}},
                        "profile": dict(copy.deepcopy(service.DEFAULT_PROFILE), set_wallpaper=True), "palette": {},
-                       "review": {}, "exportText": "", "exportComponent": "", "wallpaperUrl": "", "connection": {}, "problem": {}, "activity": ""}
+                       "review": {}, "exportText": "", "exportComponent": "", "wallpaperUrl": "", "connection": {}, "problem": {}, "activity": "",
+                       "update": self.initial_update()}
         self._review = None
         self._work = None
         self.timer = QTimer(self)
@@ -280,6 +327,290 @@ class Controller(QObject):
         if self.bootstrap():
             self.refresh()
             self.refreshLauncher()
+        # Opt-in only, after the first window is usable, at most once a day.
+        QTimer.singleShot(15000, self.automaticUpdateCheck)
+
+    # --- Updates ---------------------------------------------------------------
+
+    def initial_update(self):
+        try:
+            source = updates.source()
+            page, mirror, problem = source.page, source.mirror, ""
+        except updates.UpdateError as exc:
+            page, mirror, problem = f"https://github.com/{updates.REPOSITORY}/releases", "", str(exc)
+        preference = updates.preferences(self.paths)
+        return {"status": "idle", "current": updates.__version__, "version": "", "page": page,
+                "releases": page, "published": "", "size": "", "sha256": "", "confirmed": False,
+                "path": "", "problem": "", "sourceProblem": problem, "mirror": mirror, "phase": "", "done": 0, "total": 0,
+                "error": "", "notice": "", "automatic": preference["automatic"],
+                "lastCheck": preference["last_check"], "previous": {}, "installed": "", "restored": False,
+                "operation": "", "cancelling": False, "settingError": "", "keptError": "", "retry": "check", "keptIn": str(updates.directory(self.paths) / "previous")}
+
+    def publish_update(self, **values):
+        self.publish(update=dict(self._state["update"], retry=self._update_retry or "check", **values))
+
+    def disk_version(self):
+        """The version in the AppImage file: the running one unless an install awaits a restart."""
+        return self._disk["version"]
+
+    def previous_update(self):
+        saved = updates.read_previous(self.paths, self.disk_version())
+        return dict(saved, sizeText=updates.megabytes(saved["size"])) if saved else {}
+
+    def run_update(self, operation, complete):
+        work = UpdateWork(operation)
+        self._update_work = work
+        work.signals.progress.connect(self.updateProgress)
+
+        def finished(result, error):
+            self._update_work = None
+            if not self._closing:
+                complete(result, error)
+        work.signals.finished.connect(finished)
+        self.update_pool.start(work)
+
+    @Slot(str, int, int)
+    def updateProgress(self, phase, done, total):
+        if self._update_work is not None:
+            self.publish_update(phase=phase, done=done, total=total)
+
+    def current_target(self):
+        target = updates.installation()
+        if not target["problem"] and updates.state_problem(self.paths, target["path"]):
+            return dict(target, problem=updates.state_problem(self.paths, target["path"]))
+        known = self._disk.get("fingerprint")
+        if not target["problem"] and known and target["fingerprint"] != known:
+            target = dict(target, problem=f"{target['path']} was replaced outside this window, so the version "
+                          "it contains is unknown here. Restart Linux Theming, then check again.")
+        return target
+
+    @Slot()
+    def openUpdates(self):
+        """Read where an update would go. Local and instant; nothing is contacted."""
+        target = self.current_target()
+        preference = updates.preferences(self.paths)
+        if self._update_work is not None:
+            # A check or install is running: show where it goes, change nothing.
+            status = self._state["update"]["status"]
+            shown = self._offer_target if status == "working" else target
+            # An automatic check runs quietly; once the dialog is open, show it as checking.
+            self.publish_update(path=shown.get("path", ""), problem=shown.get("problem", ""),
+                                automatic=preference["automatic"], lastCheck=preference["last_check"],
+                                **({"status": "checking"} if status in ("idle", "current", "error") else {}))
+            return
+        self._update_target = target
+        stale = {}
+        if self._update_release is not None and (target["problem"]
+                                                 or target.get("fingerprint") != self._offer_target.get("fingerprint")):
+            # Never install an offer reviewed against a different file.
+            self._update_release, self._offer_target = None, {}
+            stale = {"status": "idle", "notice": "The AppImage changed after the last check. Check again."}
+        self.publish_update(path=target["path"], problem=target["problem"], previous=self.previous_update(),
+                            automatic=preference["automatic"], lastCheck=preference["last_check"],
+                            keptError=updates.kept_folder_problem(self.paths), **stale)
+
+    @Slot()
+    def checkForUpdates(self, automatic=False):
+        state = self._state["update"]
+        if self._update_work is not None or self._closing or state["status"] == "installed" or state["sourceProblem"]:
+            if state["sourceProblem"] and not automatic:
+                self.publish_update(status="error", error=state["sourceProblem"])
+            return
+        self._update_target = target = self.current_target()
+        self._update_retry = "check"
+        if not automatic:
+            self.publish_update(status="checking", error="", notice="", path=self._update_target["path"],
+                                problem=self._update_target["problem"])
+
+        def complete(result, error):
+            with_stamp = {}
+            try:
+                with_stamp = {"lastCheck": updates.save_preferences(self.paths, last_check=updates.stamp())["last_check"]}
+            except (OSError, ValueError) as exc:
+                print(f"Update check time could not be saved: {exc}", file=sys.stderr)
+            # An automatic check stays quiet unless the dialog was opened meanwhile.
+            quiet = automatic and self._state["update"]["status"] != "checking"
+            if error:
+                self._update_release = None
+                if quiet:
+                    print(f"Automatic update check failed: {error}", file=sys.stderr)
+                    self.publish_update(**with_stamp)
+                else:
+                    self.publish_update(status="error", error=error, **with_stamp)
+                return
+            available = result["status"] == "available"
+            self._update_release = result if available else None
+            self._offer_target = dict(target) if available else {}
+            asset = result.get("asset", {})
+            if quiet and not available:
+                self.publish_update(**with_stamp)
+                return
+            self.publish_update(status=result["status"], version=result["version"], page=result["page"],
+                                published=result["published"], size=updates.megabytes(asset["size"]) if asset else "",
+                                sha256=asset.get("sha256", ""), confirmed=asset.get("confirmed", False),
+                                mirror=result.get("mirror", ""), path=target["path"], problem=target["problem"],
+                                error="", **with_stamp)
+        # Cancelled by shutdown: a stalled server never holds the application open.
+        self.run_update(lambda work: updates.check(cancelled=work.cancel), complete)
+
+    @Slot()
+    def automaticUpdateCheck(self):
+        if self._closing or self._update_work is not None:
+            return
+        try:
+            due = updates.due(updates.preferences(self.paths))
+        except (OSError, ValueError):
+            due = False
+        if due:
+            self.checkForUpdates(automatic=True)
+
+    def finish_update(self, restored):
+        def complete(result, error):
+            if not error:  # The file this window just installed and verified.
+                self._disk = {"fingerprint": result.get("fingerprint") or updates.installation().get("fingerprint"),
+                              "version": result["version"]}
+            self._update_target = target = self.current_target()
+            common = {"phase": "", "cancelling": False, "path": target["path"], "problem": target["problem"]}
+            offered = self._offer_target.get("fingerprint")
+            if error and offered and target.get("fingerprint") != offered:
+                # The AppImage changed since the check: that review no longer applies.
+                self._update_release, self._offer_target, self._update_retry = None, {}, "check"
+                self.publish_update(status="error", error=error + " Check again to review the current file.",
+                                    notice="", **common)
+            elif error and restored and self._restore_from == "installed":
+                # Nothing was replaced: the installed update still awaits a restart.
+                self.publish_update(status="installed", error="", notice=error, **common)
+            elif isinstance(result, updates.Cancelled):
+                # A cancelled download leaves the checked release ready to install again.
+                status = "available" if self._update_release is not None and not restored else "idle"
+                self.publish_update(status=status, error="", notice=error, **common)
+            elif error:
+                self.publish_update(status="error", error=error, notice="", **common)
+            elif result["version"] == updates.__version__:
+                # Switched back to the version this window runs: nothing awaits a restart,
+                # and the file is again the one this window can vouch for.
+                self._update_release, self._offer_target, self._update_retry = None, {}, "check"
+                self.publish_update(status="idle", installed="", restored=False, error="",
+                                    notice=f"Version {result['version']} is back in place. No restart is needed.",
+                                    **common)
+            else:
+                self._update_release, self._offer_target, self._update_retry = None, {}, "check"
+                self.publish_update(status="installed", installed=result["version"], restored=restored,
+                                    error="", notice="", **common)
+            # The kept copy to offer depends on the version now in the file.
+            previous = self.previous_update()
+            if error and restored and not self.same_kept(previous, self._restore_approved):
+                self._update_retry = "check"  # Confirm a switch to the new copy again.
+                self.publish_update(previous=previous, keptError="The kept copy changed after it was shown. "
+                                    "Review it again.")
+            else:
+                self.publish_update(previous=previous)
+        return complete
+
+    @Slot()
+    def installUpdate(self):
+        # The file as it was reviewed; the engine refuses it if it has changed since.
+        release, target = self._update_release, self._offer_target
+        if (self._update_work is not None or release is None or target.get("problem")
+                or self._state["update"]["status"] not in ("available", "error")):
+            return
+        self._update_retry = "install"
+        self.publish_update(status="working", operation="install", phase="download", done=0,
+                            total=release["asset"]["size"], error="", notice="", cancelling=False)
+        self.run_update(lambda work: updates.install(self.paths, release, target, progress=work.report,
+                                                     cancelled=work.cancel),
+                        self.finish_update(False))
+
+    @Slot()
+    def restorePrevious(self, retry=False):
+        current = self.disk_version()
+        # A retry repeats the switch that was confirmed, never one to a copy shown later.
+        reviewed = self._restore_approved if retry else self._state["update"]["previous"]
+        if self._update_work is not None or not reviewed or self._state["update"]["status"] == "working":
+            return
+        self._update_target = target = self.current_target()
+        if target["problem"]:
+            # Shown where the dialog explains why this copy cannot change; a pending restart stays.
+            self.publish_update(path=target["path"], problem=target["problem"])
+            return
+        if not self.same_kept(updates.read_previous(self.paths, current), reviewed):
+            self._update_retry = "check" if retry else self._update_retry
+            self.publish_update(previous=self.previous_update(),
+                                keptError=updates.kept_folder_problem(self.paths)
+                                or "The kept copy changed after it was shown. Review it again.")
+            return
+        self._update_retry = "restore"
+        self._restore_approved = dict(reviewed)
+        self._restore_from = self._state["update"]["status"]
+        self.publish_update(status="working", operation="restore", phase="download", done=0, total=reviewed["size"],
+                            error="", notice="", cancelling=False, keptError="")
+        expected = dict(reviewed)
+        self.run_update(lambda work: updates.restore(self.paths, target, current=current, expected=expected,
+                                                     progress=work.report, cancelled=work.cancel),
+                        self.finish_update(True))
+
+    @staticmethod
+    def same_kept(first, second):
+        keys = ("version", "path", "sha256")
+        return bool(first) and bool(second) and all(first.get(key) == second.get(key) for key in keys)
+
+    @Slot()
+    def retryUpdate(self):
+        if self._update_retry == "install" and self._update_release is not None:
+            self.installUpdate()
+        elif self._update_retry == "restore":
+            self.restorePrevious(retry=True)
+        else:
+            self.checkForUpdates()
+
+    @Slot()
+    def cancelUpdate(self):
+        # Accepted only before the replacement begins, decided with the worker, not
+        # from progress messages that may still be queued.
+        if self._update_work is not None and self._update_work.cancel.cancel():
+            self.publish_update(cancelling=True)
+
+    @Slot()
+    def discardPrevious(self):
+        if self._update_work is not None or self._state["update"]["status"] == "working":
+            return
+
+        def complete(_result, error):
+            # Its own message: the update status and a pending restart stay as they were.
+            if not error and self._update_retry == "restore":
+                self._update_retry = "check"  # Nothing is left to switch to.
+            self.publish_update(previous=self.previous_update(), keptError=f"The kept copy was not deleted: {error}"
+                                if error else "", notice="" if error else "The kept copy was deleted.")
+        reviewed, current = dict(self._state["update"]["previous"]), self.disk_version()
+        self.run_update(lambda work: updates.discard_previous(self.paths, current=current, expected=reviewed), complete)
+
+    @Slot(bool)
+    def setAutomaticUpdates(self, enabled):
+        try:
+            preference = updates.save_preferences(self.paths, automatic=bool(enabled))
+        except (OSError, ValueError) as exc:
+            # Separate from the operation status: a running install keeps its progress and Cancel.
+            self.publish_update(settingError=f"The update setting could not be saved: {exc}")
+            return
+        self.publish_update(automatic=preference["automatic"], settingError="")
+
+    @Slot(bool)
+    def restartAfterUpdate(self, quick):
+        if self._state["update"]["status"] != "installed" or self._state["busy"]:
+            if self._state["busy"]:
+                self.explainBusyClose()
+            return
+        self.relaunch_arguments = ["--quick" if quick else "--center"]
+        QGuiApplication.quit()
+
+    def relaunch(self):
+        """Called after the event loop and workers have stopped."""
+        if self.relaunch_arguments is None or not self._update_target.get("path"):
+            return
+        try:
+            updates.relaunch(self._update_target, self.relaunch_arguments)
+        except OSError as exc:
+            print(f"Linux Theming was updated but could not be restarted: {exc}. Start it again.", file=sys.stderr)
 
     @Slot()
     def refresh(self, *, background=False):
@@ -786,6 +1117,9 @@ class Controller(QObject):
             shiboken6.delete(self.watcher)
             self.watcher = None
         self.invalidate_preview()
+        if self._update_work is not None:
+            self._update_work.cancel.cancel()  # Refused only once the replacement has begun.
         self.pool.waitForDone()
         self.preview_pool.waitForDone()
         self.read_pool.waitForDone()
+        self.update_pool.waitForDone()
