@@ -3,6 +3,7 @@
 import copy
 import json
 import os
+import re
 import tempfile
 import tomllib
 import unittest
@@ -136,6 +137,19 @@ class IntegrationTests(unittest.TestCase):
                 "zsh": "PROMPT='%n@%m %~ %# '", "fish": "my prompt> "}.items():
             self.assertIn(preference, originals[component].read_text(), component)
             self.assertEqual(originals[component].stat().st_mode & 0o777, 0o640)
+
+    def test_gtk3_menus_and_header_bars_set_text_with_their_backgrounds(self):
+        # Themes such as Adwaita give these their own background but no text color,
+        # so the window's palette text color would otherwise reach them.
+        text = theme.render("gtk3", theme.palette(self.profile))
+        found = {selector.strip(): body for selectors, body in re.findall(r"([^{}]+)\{([^{}]*)\}", text)
+                 for selector in selectors.split(",")}
+        for selector in ("menu", ".menu", ".context-menu", "headerbar", ".titlebar", "headerbar button"):
+            self.assertRegex(found[selector], r"background-color: #\w{6};", selector)
+            self.assertRegex(found[selector], r"(?:^|;)\s*color: #\w{6};", selector)
+        self.assertIn("background-color: transparent", found["headerbar button.titlebutton"])
+        self.assertIn("@define-color theme_unfocused_selected_bg_color", text)
+        self.assertNotIn("menu", theme.render("gtk4", theme.palette(self.profile)))
 
     def test_shared_sway_color_and_background_ownership_composes_and_disconnects_independently(self):
         from PIL import Image

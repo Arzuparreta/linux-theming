@@ -17,7 +17,7 @@ import tempfile
 import urllib.parse
 from pathlib import Path
 
-from . import activation, applications, autoreload, changes, formats, merge, rofi, structured
+from . import activation, applications, autoreload, changes, formats, gtkcss, merge, rofi, structured
 
 FILES = {
     **dict.fromkeys(sorted(applications.COMPONENTS), ()),
@@ -306,8 +306,16 @@ def render(component, value):
                                 "dialog_bg_color": bg, "dialog_fg_color": fg,
                                 "popover_bg_color": bg, "popover_fg_color": fg}.items():
                 text += f"@define-color {name} {color};\n"
-            return text + (f"window, dialog, .background {{ background-color: {bg}; color: {fg}; }}\n"
-                           f"selection, *:selected {{ background-color: {accent}; color: {bg}; }}\n")
+            if component == "gtk3":
+                # Unfocused windows. Applications such as Thunar draw with these names.
+                for name, color in {"theme_unfocused_fg_color": fg, "theme_unfocused_text_color": fg,
+                                    "theme_unfocused_bg_color": bg, "theme_unfocused_base_color": bg,
+                                    "theme_unfocused_selected_bg_color": accent,
+                                    "theme_unfocused_selected_fg_color": bg}.items():
+                    text += f"@define-color {name} {color};\n"
+            text += (f"window, dialog, .background {{ background-color: {bg}; color: {fg}; }}\n"
+                     f"selection, *:selected {{ background-color: {accent}; color: {bg}; }}\n")
+            return text + (gtkcss.gtk3(c) if component == "gtk3" else "")
         if component == "waybar":
             return text + (f"window#waybar, tooltip {{ background-color: {bg}; color: {fg}; }}\n"
                            f"#workspaces button {{ background-color: {bg}; color: {fg}; }}\n"

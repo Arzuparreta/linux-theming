@@ -35,7 +35,7 @@ reopen it yourself.
 | Wofi | Window, input, text and selected/hover entry colors in `style.css` | Keep launcher behavior/layout. Custom higher-specificity rules may override defaults. Next invocation |
 | Dunst | Global/default and low/normal/critical urgency colors | Keep fonts, timeouts and application-specific filter rules. Filters can intentionally override defaults. Reload yourself |
 | Mako | Root/default background, text, border and progress colors | Keep behavior and filter-specific overrides. Use its reload action yourself |
-| GTK 3 | User `gtk-3.0/gtk.css` semantic palette and window/selection defaults | Keep installed theme, icons and fonts. Custom theme rules can override defaults. Reopen applications |
+| GTK 3 | User `gtk-3.0/gtk.css` semantic palette, window/selection defaults, and menus and header bars with their text and buttons | Keep installed theme, icons and fonts. Custom theme rules can override defaults. Reopen applications |
 | GTK 4 / libadwaita | Separate `gtk-4.0/gtk.css` semantic window/view/accent roles and defaults | Application CSS and libadwaita versions may override or ignore roles. Does not recolor GNOME Shell, guarantee all widgets, or change the native light/dark preference. Reopen applications |
 | Qt settings | qt5ct/qt6ct custom palette references and generated QPalette role file | Applications must already use the corresponding platform theme. No environment variables, styles, fonts or icons are changed. Both config files are shown in review. Reopen applications |
 | zsh | Native ZLE selection/search/paste roles and optional zsh-syntax-highlighting color roles | Append guarded assignments to `~/.zshrc` or supported `$ZDOTDIR/.zshrc`. Keep prompt, bindings, plugins and aliases. No shell code is evaluated during inspection. Open a new interactive shell |
@@ -189,6 +189,12 @@ value. A changed session, locked setting or later preference edit blocks changes
 Partial failures roll back completed settings and files together. Recovery accepts
 only the recorded before/after values. Native settings APIs do not provide atomic
 compare-and-set, so another settings writer can still race the final check.
+
+GTK 3 themes such as Adwaita give menus and header bars their own background but
+no text color, so the palette text color of the window reached them: light text
+on white menus and light title bars. The GTK 3 rules set those surfaces, and the
+title-bar buttons, together with their text, and define the unfocused selection
+colors as well.
 
 The INI editor preserves unrelated entries/comments and rejects duplicate keys or
 sections and unsupported syntax, naming the line (KDE files: see
