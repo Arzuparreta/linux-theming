@@ -726,6 +726,21 @@ class UpdateTests(unittest.TestCase):
                    side_effect=lambda path, *a, **k: real_lstat(path, *a, **k) if Path(path) != foreign
                    else os.stat_result((stat.S_IFLNK | 0o777, 0, 0, 1, os.getuid() + 1, 0, 0, 0, 0, 0))):
             self.assertEqual(updates.modifiable_by_others(foreign), foreign)
+        # A ".." in a link destination leaves a folder another account owns: it is audited too.
+        other = shared / "other"
+        other.mkdir()
+        mine = shared / "mine/Applications"
+        mine.mkdir(parents=True)
+        shared.chmod(0o1777)
+        dotted = self.root / "home/Dotted"
+        dotted.symlink_to(f"{shared}/other/../mine/Applications")
+        self.assertIn(other, updates._directories_used(dotted))
+        real_stat = os.stat
+        with patch("linux_theming.updates.os.stat",
+                   side_effect=lambda path, *a, **k: real_stat(path, *a, **k) if Path(path) != other
+                   else os.stat_result((stat.S_IFDIR | 0o755, 0, 0, 2, os.getuid() + 1, 0, 0, 0, 0, 0))):
+            self.assertEqual(updates.modifiable_by_others(dotted), other)
+        shared.chmod(0o777)
         private = self.root / "home/Private"
         private.symlink_to(self.root / "real/Apps")  # Links among private folders are fine.
         self.assertIsNone(updates.modifiable_by_others(private))
@@ -755,6 +770,15 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(updates.read_previous(self.paths, "9.0.0"), {})
         self.assertIn("chmod 700", updates.kept_folder_problem(self.paths))
         self.assertIn(b"old", self.installed.read_bytes()[:16])
+
+    def test_kept_copies_under_a_linked_state_folder_are_not_offered(self):
+        self.install()
+        self.assertEqual(updates.read_previous(self.paths, "9.0.0")["version"], "8.0.0")
+        state = self.paths.state / "linux-theming"
+        moved = self.root / "moved-state"
+        os.replace(state, moved)
+        state.symlink_to(moved)
+        self.assertEqual(updates.read_previous(self.paths, "9.0.0"), {})
 
     def test_installed_file_never_grants_group_or_other_write(self):
         self.installed.chmod(0o775)

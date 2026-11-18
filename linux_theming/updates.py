@@ -598,6 +598,9 @@ def _directories_used(folder, links=None):
         if part in ("", "."):
             continue
         if part == "..":
+            # The folder left through ".." was traversed too: whoever can rename it
+            # (or replace it with a link) changes where this path leads.
+            used.append(current)
             current = current.parent
             continue
         entry = current / part
@@ -891,8 +894,11 @@ def _private_folder(folder):
 def _kept_records(paths):
     folder = directory(paths) / "previous"
     records = []
-    if not (_private_folder(directory(paths)) and _private_folder(folder)):
-        return records  # Nothing from a folder others could use is offered or read.
+    linked = any(parent.is_symlink() for parent in [folder, *folder.parents] if parent.is_relative_to(paths.state)
+                 and parent != paths.state)
+    if (linked or not (_private_folder(directory(paths)) and _private_folder(folder))
+            or modifiable_by_others(folder) is not None):
+        return records  # Nothing from a folder others could use or redirect is offered or read.
     try:
         candidates = sorted(folder.glob("LinuxTheming-*.json"))
     except OSError:
