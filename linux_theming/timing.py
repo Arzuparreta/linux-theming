@@ -28,11 +28,11 @@ def observe(app, window, controller, started):
             marks["usable_ms"] = elapsed
             marks["inventory_pending"] = state["scanning"]
             marks["scope"] = "isolated fixture; in-process milestones exclude interpreter and AppImage mount/extraction"
-            print("DESKTOP_THEMING_TIMING " + json.dumps(marks, sort_keys=True), flush=True)
+            print("LINUX_THEMING_TIMING " + json.dumps(marks, sort_keys=True), flush=True)
             timer.stop()
             app.exit(0)
         elif elapsed > 15000:
-            print("DESKTOP_THEMING_TIMING " + json.dumps(dict(marks, error=state["error"] or "Startup diagnostic timed out")), flush=True)
+            print("LINUX_THEMING_TIMING " + json.dumps(dict(marks, error=state["error"] or "Startup diagnostic timed out")), flush=True)
             timer.stop()
             app.exit(1)
 

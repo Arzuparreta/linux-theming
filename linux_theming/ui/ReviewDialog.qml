@@ -350,7 +350,7 @@ Sheet {
                 id: approveButton
                 objectName: "approveChanges"
                 primary: true
-                text: dialog.undo ? "Restore" : dialog.review.kind === "migration" ? "Migrate" : dialog.review.kind === "launcher" ? "Confirm" : "Apply"
+                text: dialog.undo ? "Restore" : dialog.review.kind === "launcher" ? "Confirm" : "Apply"
                 hint: "Alt+Enter"
                 enabled: !dialog.s.busy && (dialog.undo || !!dialog.review.allowEmpty || dialog.changes.length > 0)
                 onClicked: dialog.controller.approve()

@@ -129,12 +129,6 @@ See [validation evidence and limitations](docs/DEVELOPMENT.md#support-evidence).
 
 ## Local data and recovery
 
-Upgrading from Desktop Theming reads your existing setup first. **Review
-migration…** shows the exact changes before moving active data and references.
-Old history remains available for ordered undo. Registered menu entries have a
-separate reviewed update in **⋯ → Menu entry and shortcut…**. See [migration and recovery](docs/MIGRATION.md)
-before deleting old directories or returning to an older version.
-
 Respects `XDG_CONFIG_HOME` and `XDG_STATE_HOME`, with these normal defaults:
 
 ```text

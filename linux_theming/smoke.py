@@ -193,9 +193,6 @@ def exercise(app, engine, controller):
                 if not engine.rootObjects():
                     raise ValueError("QML window is missing")
                 exercise_integrations(controller.paths)
-                from . import migration
-
-                print(migration.exercise())
                 print("PASS: QML, image/folder dialogs, thumbnails, guided connection, quick theme change, search/random, preview, review, apply, reviewed undo and export (isolated HOME/XDG).")
                 timer.stop()
                 app.exit(0)

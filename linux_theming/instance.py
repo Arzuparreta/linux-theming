@@ -21,7 +21,6 @@ from pathlib import Path
 from . import __version__
 
 APP = "linux-theming"
-LEGACY_APP = "desktop-theming"
 PROTOCOL = 1
 REQUESTS = ("show", "quick", "center")
 MAX_MESSAGE = 1024
@@ -36,7 +35,7 @@ class Unavailable(Exception):
     """Single-instance activation cannot be used safely; run independently."""
 
 
-def runtime_directory(environ=None, app_id=APP):
+def runtime_directory(environ=None):
     env = os.environ if environ is None else environ
     value = env.get("XDG_RUNTIME_DIR", "")
     if not value.startswith("/"):
@@ -49,7 +48,7 @@ def runtime_directory(environ=None, app_id=APP):
     if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
             or stat.S_IMODE(info.st_mode) & 0o077):
         raise Unavailable(f"XDG_RUNTIME_DIR ({base}) is not a private directory owned by you.")
-    directory = base / app_id
+    directory = base / APP
     try:
         os.mkdir(directory, 0o700)
     except FileExistsError:
@@ -97,8 +96,8 @@ def instance_key(paths, environ=None):
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:32]
 
 
-def endpoint(paths, environ=None, app_id=APP):
-    directory = runtime_directory(environ, app_id)
+def endpoint(paths, environ=None):
+    directory = runtime_directory(environ)
     key = instance_key(paths, environ)
     result = {"socket": directory / f"{key}.sock", "lock": directory / f"{key}.lock", "key": key}
     if len(os.fsencode(result["socket"])) > SUN_PATH_MAX:
@@ -122,17 +121,17 @@ def _decode(data):
         value = json.loads(data.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
         raise ValueError("Malformed instance message.") from None
-    if (not isinstance(value, dict) or value.get("app") not in (APP, LEGACY_APP)
+    if (not isinstance(value, dict) or value.get("app") != APP
             or type(value.get("protocol")) is not int or not isinstance(value.get("version"), str)
             or not VERSION.fullmatch(value["version"])):
         raise ValueError("Not a Linux Theming instance message.")
     return value
 
 
-def request_message(request, *, token="", version=__version__, app_id=APP):
+def request_message(request, *, token="", version=__version__):
     if request not in REQUESTS:
         raise ValueError(f"Unknown launch request: {request}")
-    return encode({"app": app_id, "protocol": PROTOCOL, "version": version,
+    return encode({"app": APP, "protocol": PROTOCOL, "version": version,
                    "request": request, "token": token if token and TOKEN.fullmatch(token) else ""})
 
 
@@ -188,13 +187,8 @@ class Claim:
     lock: object = None
     socket: Path | None = None
     reply: dict = field(default_factory=dict)
-    extra_locks: list = field(default_factory=list)
-    extra_sockets: list = field(default_factory=list)
 
     def release(self):
-        for lock in self.extra_locks:
-            lock.unlock()
-        self.extra_locks.clear()
         if self.lock is not None:
             self.lock.unlock()
             self.lock = None
@@ -222,20 +216,6 @@ def _forward(path, data, timeout):
 
 
 def claim(paths, request="show", *, environ=None, timeout=5.0):
-    # Old and new binaries must elect one primary. Acquire the old lock first.
-    legacy = _claim(paths, request, environ=environ, timeout=timeout, app_id=LEGACY_APP)
-    if legacy.role != "primary":
-        return legacy
-    modern = _claim(paths, request, environ=environ, timeout=timeout, app_id=APP)
-    if modern.role != "primary":
-        legacy.release()
-        return modern
-    modern.extra_locks.append(legacy.lock)
-    modern.extra_sockets.append(legacy.socket)
-    return modern
-
-
-def _claim(paths, request="show", *, environ=None, timeout=5.0, app_id=APP):
     """Become the primary window, or hand `request` to the one already running.
 
     Never terminates or replaces a running instance. Two launches racing each
@@ -248,11 +228,11 @@ def _claim(paths, request="show", *, environ=None, timeout=5.0, app_id=APP):
     except ImportError:
         return Claim("standalone", "Qt networking is unavailable; this launch runs on its own.")
     try:
-        place = endpoint(paths, env, app_id)
+        place = endpoint(paths, env)
     except Unavailable as exc:
         return Claim("standalone", str(exc))
     token = env.get("XDG_ACTIVATION_TOKEN", "")
-    data = request_message(request, token=token, app_id=app_id)
+    data = request_message(request, token=token)
     lock = QLockFile(os.fspath(place["lock"]))
     lock.setStaleLockTime(0)  # Stale only when the recorded process no longer exists.
     deadline = time.monotonic() + timeout
@@ -310,20 +290,9 @@ def server_class():
             self.server.setSocketOptions(QLocalServer.UserAccessOption)
             self.server.setMaxPendingConnections(MAX_CONNECTIONS)
             self.server.newConnection.connect(self._accept)
-            self.legacy_servers = []
             self.connections = {}
 
         def listen(self):
-            for socket_path in self.claimed.extra_sockets:
-                server = QLocalServer(self)
-                server.setSocketOptions(QLocalServer.UserAccessOption)
-                server.setMaxPendingConnections(MAX_CONNECTIONS)
-                QLocalServer.removeServer(os.fspath(socket_path))
-                if not server.listen(os.fspath(socket_path)):
-                    self.close()
-                    return False
-                server.newConnection.connect(lambda s=server: self._accept(s))
-                self.legacy_servers.append(server)
             path = os.fspath(self.claimed.socket)
             # We hold the lock, so any socket file left here belongs to a dead process.
             QLocalServer.removeServer(path)
@@ -337,14 +306,11 @@ def server_class():
                 connection.deleteLater()
             self.connections.clear()
             self.server.close()
-            for server in self.legacy_servers:
-                server.close()
             self.claimed.release()
 
-        def _accept(self, source=None):
-            source = source or self.server
-            while source.hasPendingConnections():
-                connection = source.nextPendingConnection()
+        def _accept(self):
+            while self.server.hasPendingConnections():
+                connection = self.server.nextPendingConnection()
                 if len(self.connections) >= MAX_CONNECTIONS:
                     connection.abort()
                     connection.deleteLater()
@@ -376,13 +342,13 @@ def server_class():
             except ValueError:
                 self._reply(connection, "rejected")
                 return
-            self._reply(connection, "activated", app_id=_decode(buffer)["app"])
+            self._reply(connection, "activated")
             self.requested.emit(request["request"], handoff_notice(request, self.version),
                                 request["token"])
 
-        def _reply(self, connection, status, app_id=APP):
+        def _reply(self, connection, status):
             self.connections[connection] = b"\0" * (MAX_MESSAGE + 1)  # Ignore further input.
-            connection.write(encode({"app": app_id, "protocol": PROTOCOL, "version": self.version,
+            connection.write(encode({"app": APP, "protocol": PROTOCOL, "version": self.version,
                                      "status": status}))
             connection.flush()
             connection.disconnectFromServer()

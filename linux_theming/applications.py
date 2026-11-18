@@ -38,21 +38,21 @@ def targets(paths, component):
         changes.safe_parents(profile, paths.data)
         if not profile.is_file():
             raise ValueError('Konsole default profile must exist in XDG_DATA_HOME/konsole; system profiles are not modified.')
-        scheme = 'DesktopTheming' if paths.app_id == 'desktop-theming' else 'LinuxTheming'
+        scheme = 'LinuxTheming'
         return [config, profile, paths.data / f'konsole/{scheme}.colorscheme']
     if component == 'vscode':
         return [paths.config / 'Code/User/settings.json']
     if component == 'btop':
-        return [paths.config / 'btop/btop.conf', paths.config / f'btop/themes/{paths.app_id}.theme']
+        return [paths.config / 'btop/btop.conf', paths.config / 'btop/themes/linux-theming.theme']
     if component == 'tmux':
         legacy, modern = paths.home / '.tmux.conf', paths.config / 'tmux/tmux.conf'
         if (legacy.exists() or legacy.is_symlink()) and (modern.exists() or modern.is_symlink()):
             raise ValueError('Both ~/.tmux.conf and XDG tmux.conf exist; keep one active configuration before connecting.')
         return [modern if modern.exists() or modern.is_symlink() else legacy,
-                paths.config / f'tmux/{paths.app_id}.conf']
+                paths.config / 'tmux/linux-theming.conf']
     if component == 't3code':
         root = t3_home(paths) / 'userdata'
-        return [root / 'settings.json', root / f'themes/{paths.app_id}.json']
+        return [root / 'settings.json', root / 'themes/linux-theming.json']
     raise ValueError('Unsupported application integration.')
 
 

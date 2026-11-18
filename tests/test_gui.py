@@ -107,41 +107,6 @@ class GuiTests(unittest.TestCase):
         finally:
             other.shutdown()
 
-    def test_published_profile_migrates_only_after_gui_review_and_can_be_undone(self):
-        from tests.legacy_fixture import restore
-
-        self.operation_timeout = 45  # All 25 selected adapters, including their restoration records.
-        self.dispose()
-        restore(self.root)
-        self.controller = Controller(self.paths)
-        self.engine = QQmlApplicationEngine()
-        self.engine.setInitialProperties({"controller": self.controller})
-        self.engine.load(QUrl.fromLocalFile(str(Path(__file__).resolve().parents[1] / "linux_theming/ui/Main.qml")))
-        self.window = self.engine.rootObjects()[0]
-        self.controller.startup()
-        self.settle()
-        self.assertTrue(self.controller.state["migration"]["needed"])
-        self.assertEqual(self.controller.state["applied"]["polarity"], "light")
-        old_profile = self.root / "config/desktop-theming/profile.json"
-        self.assertTrue(old_profile.exists())
-        self.click("reviewDataMigration")
-        self.assertEqual(self.controller.state["review"]["kind"], "migration")
-        self.controller.cancelReview()
-        self.settle()
-        self.assertTrue(old_profile.exists())
-        self.click("reviewDataMigration")
-        self.click("approveChanges")
-        self.assertFalse(self.controller.state["error"], self.controller.state["error"])
-        self.assertFalse(self.controller.state["migration"]["needed"])
-        self.assertTrue((self.root / "config/linux-theming/profile.json").exists())
-        self.controller.undoLatest()
-        self.settle()
-        self.click("approveChanges")
-        self.assertFalse(self.controller.state["error"], self.controller.state["error"])
-        self.assertTrue(self.controller.state["migration"]["needed"])
-        self.assertTrue(old_profile.exists())
-        self.assertEqual(self.messages, [])
-
     def test_navigation_rejects_symlink(self):
         from linux_theming import navigation
 

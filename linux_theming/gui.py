@@ -26,7 +26,6 @@ from . import (
     changes,
     inventory,
     library,
-    migration,
     navigation,
     presentation,
     service,
@@ -131,7 +130,7 @@ class Controller(QObject):
                        "scanning": False, "folderLoading": False, "error": "", "notice": "",
                        "applied": copy.deepcopy(service.DEFAULT_PROFILE), "pending": False,
                        "hasApplied": self.paths.profile.exists(), "activation": [],
-                       "launcher": {}, "shortcut": "", "migration": migration.status(self.paths),
+                       "launcher": {}, "shortcut": "",
                        "overview": {"components": [], "history": [], "session": {"desktop": "Unknown", "type": "unknown"}},
                        "profile": dict(copy.deepcopy(service.DEFAULT_PROFILE), set_wallpaper=True), "palette": {},
                        "review": {}, "exportText": "", "exportComponent": "", "wallpaperUrl": "", "connection": {}, "problem": {}, "activity": "",
@@ -248,9 +247,6 @@ class Controller(QObject):
                     or self.timer.isActive() or self.rescan_timer.isActive())
 
     def problem(self, context, detail):
-        if "migration" in detail.lower():
-            return {"title": "Data migration needs attention", "body": detail,
-                    "action": "access", "label": "Open menu entry options"}
         if context == "launcher":
             return {"title": "Application menu needs attention", "body": detail,
                     "action": "access", "label": "Open menu entry options"}
@@ -957,15 +953,13 @@ class Controller(QObject):
             summary.extend("Reload the restored i3 window colors without restarting." for action in plan.get("activation_actions", []))
             summary.extend(plan.get("activation_notes", []))
             item = next((entry for entry in self._state["overview"]["history"] if entry["id"] == ident), {})
-            if item.get("migration"):
-                summary.append("Restore the old application data and references, keeping the latest image browsing choices.")
             for label, key in (("Change", "theme"), ("Restore", "previous_theme")):
                 value = item.get(key)
                 if value:
                     summary.append(label + ": " + (Path(value["wallpaper"]).name if value["wallpaper"] else "Default palette") + " · " + value["polarity"])
                 elif key == "previous_theme" and item.get("theme"):
                     summary.append("Restore the configuration from before Linux Theming managed this profile.")
-            self.publish(review={"kind": "undo", "title": "Recover changes" if recover else "Undo data migration" if item.get("migration") else "Undo changes",
+            self.publish(review={"kind": "undo", "title": "Recover changes" if recover else "Undo changes",
                                  "changes": files,
                                  "summary": summary,
                                  "warnings": []})
@@ -985,14 +979,12 @@ class Controller(QObject):
             return
         kind, plan = self._review
         self._review = None  # Approval is consumed once, including on conflict.
-        if kind in ("apply", "undo", "migration"):
+        if kind in ("apply", "undo"):
             self._write_epoch += 1
 
         def operation():
             if kind == "apply":
                 result = service.apply_reviewed(self.paths, plan)
-            elif kind == "migration":
-                result = migration.apply_reviewed(self.paths, plan)
             elif kind == "launcher":
                 from . import launcher
 
@@ -1011,30 +1003,16 @@ class Controller(QObject):
                 return
             self.invalidate_preview()
             self.publish(overview=overview, profile=copy.deepcopy(overview["profile"]),
-                         migration=migration.status(self.paths),
                          applied=copy.deepcopy(overview["profile"]), hasApplied=self.paths.profile.exists(),
                          review={}, palette={}, exportText="", activation=presentation.activation_guidance(
                              overview["profile"], result.get("activation", []), plan.get("configuration") if kind == "apply" else None),
-                         notice=("Data migrated. Your palette is preserved. Update an existing menu entry from ⋯ → Menu entry and shortcut."
-                                 if kind == "migration" else "Configuration saved. Some automatic color updates failed; see activation details."
+                         notice=("Configuration saved. Some automatic color updates failed; see activation details."
                                  if any(item['runtime'] == 'failed' for item in result.get('activation', []))
                                  else "Changes applied. Color update details are available."
                                  if result["status"] == "applied" else "Previous configuration restored."))
             # Keep the completion notice while regenerating the preview.
             self.timer.start()
         self.start(operation, complete, context="apply" if kind == "apply" else "launcher" if kind == "launcher" else "restore")
-
-    @Slot()
-    def reviewMigration(self):
-        def complete(plan):
-            self._review = ("migration", plan)
-            self.publish(review={"kind": "migration", "title": "Migrate Desktop Theming data",
-                                 "changes": [dict(item, label=presentation.describe_file(self.paths, item))
-                                             for item in plan["changes"]],
-                                 "summary": ["Move the current profile and managed references to Linux Theming.",
-                                             "Keep the same theme. This migration can be undone from change history."],
-                                 "warnings": plan["warnings"]})
-        self.start(lambda: migration.plan(self.paths), complete, context="restore")
 
     @Slot(str)
     def renderExport(self, component):

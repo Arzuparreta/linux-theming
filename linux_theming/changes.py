@@ -139,40 +139,28 @@ def write_journal(path, value):
 
 @contextlib.contextmanager
 def locked(paths):
-    from .paths import LEGACY_ID
-
-    # Old binaries use this lock too. Keep it until compatibility is retired.
-    directories = [paths.state / LEGACY_ID, paths.history.parent]
-    with contextlib.ExitStack() as stack:
-        for directory in directories:
-            if directory == directories[0] and not directory.exists():
-                continue
-            safe_parents(directory / "transaction.lock", paths.state)
-            private_parents(directory)
-            fd = os.open(directory / "transaction.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-            stack.callback(os.close, fd)
-            fcntl.flock(fd, fcntl.LOCK_EX)
+    directory = paths.history.parent
+    safe_parents(directory / "transaction.lock", paths.state)
+    private_parents(directory)
+    fd = os.open(directory / "transaction.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
         yield
+    finally:
+        os.close(fd)
 
 
 def history(paths):
     items = []
-    roots = getattr(paths, "history_directories", (paths.history,))
-    journals = []
-    for root in roots:
-        safe_parents(root / "entry.json", paths.state)
-        journals.extend(root.glob("*.json"))
-    seen = set()
-    for path in journals:
+    safe_parents(paths.history / "entry.json", paths.state)
+    for path in paths.history.glob("*.json"):
         try:
             if path.is_symlink():
                 raise ValueError("History journal is a symlink")
             item = json.loads(path.read_text())
-            if item["id"] in seen or path.stem != item["id"]:
-                raise ValueError("Duplicate or mismatched transaction ID")
-            seen.add(item["id"])
+            if path.stem != item["id"]:
+                raise ValueError("Mismatched transaction ID")
             items.append({"id": item["id"], "created": item["created"],
-                          "migration": bool(item.get("migration")),
                           "status": item["status"], "components": item["components"],
                           "files": len(item["changes"]), "theme": item.get("theme"),
                           "previous_theme": item.get("previous_theme"),
@@ -316,8 +304,6 @@ def apply(paths, plan, *, already_locked=False):
                    "changes": plan["changes"], "wallpaper_action": action, "settings_actions": settings}
         if "activation_actions" in plan:
             journal["activation_actions"] = plan["activation_actions"]
-        if plan.get("migration"):
-            journal["migration"] = True
         journal["theme"] = theme_summary(plan["profile"], plan.get("palette", {}).get("effective"))
         prior = snapshot(paths.profile)
         try:
@@ -391,15 +377,8 @@ def review_undo(paths, ident, *, recover=False):
     if action:
         wallpaper.check(action, "after", partial=interrupted)
     proposed = []
-    navigation = None
-    if journal.get("migration"):
-        from . import migration
-
-        navigation = migration.navigation_undo(paths, journal, recover=recover)
     for item in reversed(journal["changes"]):
         target = Path(item["path"])
-        if navigation is not None and target in navigation["paths"]:
-            continue
         root = config_root(paths, target)
         safe_parents(target, root)
         current = snapshot(target)
@@ -410,8 +389,6 @@ def review_undo(paths, ident, *, recover=False):
         reverse = replacement(target, restored, root, before=current)
         if reverse:
             proposed.append(reverse)
-    if navigation is not None:
-        proposed.extend(navigation["changes"])
     payload = {"transaction": ident, "recover": recover,
                "journal": digest(journal), "changes": proposed, "wallpaper_action": action,
                "settings_actions": settings}
@@ -419,8 +396,6 @@ def review_undo(paths, ident, *, recover=False):
         components = set(journal["components"]) | {a["component"] for a in journal["activation_actions"]}
         actions, notes = activation.plan(paths, proposed, components)
         payload.update(activation_actions=actions, activation_notes=notes)
-    if navigation is not None:
-        payload["navigation_undo"] = navigation["record"]
     return dict(payload, id=digest(payload))
 
 
@@ -434,8 +409,6 @@ def undo(paths, ident, *, recover=False, reviewed=None):
             raise ValueError("The reviewed restoration is stale. Review it again; no files were changed.")
         path = paths.journal(ident)
         journal = json.loads(path.read_text())
-        if "navigation_undo" in plan:
-            journal["navigation_undo"] = plan["navigation_undo"]
         action = journal.get("wallpaper_action")
         journal["status"] = "undoing"
         write_journal(path, journal)

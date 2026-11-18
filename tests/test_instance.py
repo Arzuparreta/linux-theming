@@ -361,10 +361,8 @@ class ProcessTests(unittest.TestCase):
         self.environ.pop("XDG_ACTIVATION_TOKEN", None)
         self.paths = SimpleNamespace(home=self.root, config=self.root / "config", state=self.root / "state")
 
-    def primary(self, lifetime=8000, startup_delay=0, *, legacy=False):
+    def primary(self, lifetime=8000, startup_delay=0):
         code = PRIMARY
-        if legacy:
-            code = code.replace("from linux_theming import instance", "from tests.fixtures.legacy_041 import instance")
         process = subprocess.Popen([sys.executable, "-c", code, str(lifetime), str(startup_delay)], env=self.environ,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=self.root)
         def cleanup():
@@ -375,23 +373,6 @@ class ProcessTests(unittest.TestCase):
         lines = self.read_until(process, "READY")
         self.assertEqual(lines[0], "primary")
         return process
-
-    def test_new_launcher_forwards_to_the_published_old_primary(self):
-        primary = self.primary(legacy=True)
-        follower = self.client("quick")
-        self.assertEqual(follower.communicate(timeout=10)[0].strip(), "forwarded activated")
-        received = self.read_until(primary, "REQ")[-1]
-        self.assertIn('REQ ["quick"', received)
-        self.assertIn("close this window", received)
-
-    def test_published_old_launcher_forwards_to_the_new_primary(self):
-        primary = self.primary()
-        code = CLIENT.replace("from linux_theming import instance", "from tests.fixtures.legacy_041 import instance")
-        follower = subprocess.run([sys.executable, "-c", code, "center"], env=self.environ,
-                                  capture_output=True, text=True, cwd=self.root, timeout=10)
-        self.assertEqual(follower.returncode, 0, follower.stderr)
-        self.assertEqual(follower.stdout.strip(), "forwarded activated")
-        self.assertIn('REQ ["center"', self.read_until(primary, "REQ")[-1])
 
     def read_until(self, process, marker, timeout=15):
         lines, deadline = [], time.monotonic() + timeout

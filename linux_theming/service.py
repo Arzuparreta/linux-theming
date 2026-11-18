@@ -50,7 +50,6 @@ def validate_profile(value):
 
 
 def load_profile(paths):
-    paths.verify_identity()
     if not paths.profile.exists():
         return dict(DEFAULT_PROFILE, components=[])
     try:
@@ -78,13 +77,6 @@ def attach(text, component, output, *, auto_reload=False):
 
 
 def make_plan(paths, profile, *, which=None):
-    from . import migration
-    from .paths import LEGACY_ID
-
-    migration.guard(paths)
-    if paths.app_id == LEGACY_ID:
-        raise ValueError("Review the Linux Theming data migration in ⋯ → Menu entry and shortcut before applying themes. "
-                         "Your existing profile and undo history are preserved.")
     pending = [item for item in changes.history(paths) if item["status"] in
                ("prepared", "recovery-needed", "undoing")]
     if pending:

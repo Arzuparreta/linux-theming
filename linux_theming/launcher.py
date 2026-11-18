@@ -29,14 +29,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import changes
-from .paths import LEGACY_ID
 
 FORMAT = 1
 APP_ID = "linux-theming"
 LAUNCHER = Path("applications") / f"{APP_ID}.desktop"
 ICON = Path("icons/hicolor/scalable/apps") / f"{APP_ID}.svg"
-LEGACY_LAUNCHER = Path("applications") / f"{LEGACY_ID}.desktop"
-LEGACY_ICON = Path("icons/hicolor/scalable/apps") / f"{LEGACY_ID}.svg"
 SOURCE_ICON = Path(__file__).parent / "ui/icon.svg"
 MAX_BYTES = 256 * 1024  # Bound on backups kept for restoration and on files read.
 CONTROL = re.compile(r"[\x00-\x1f\x7f]")
@@ -342,24 +339,9 @@ def _valid_state(value):
     return value["kind"] != "symlink" or isinstance(value.get("target"), str)
 
 
-def record_path(paths):
-    modern = locations(paths)["record"]
-    legacy = paths.state / LEGACY_ID / "launcher/registration.json"
-    found = [p for p in (modern, legacy) if p.exists() or p.is_symlink()]
-    if len(found) > 1:
-        raise ValueError("Both old and new menu registration records exist. Preserve both and resolve the conflict.")
-    return found[0] if found else modern
-
-
-def recorded_files(record):
-    root = Path(record["data_root"])
-    old = str(root / LEGACY_LAUNCHER) in record["files"]
-    return (("launcher", LEGACY_LAUNCHER), ("icon", LEGACY_ICON)) if old else (("launcher", LAUNCHER), ("icon", ICON))
-
-
 def read_record(paths):
     loc = locations(paths)
-    record = _read_json(record_path(paths), "registration record")
+    record = _read_json(loc["record"], "registration record")
     if record is None:
         return None
     try:
@@ -368,8 +350,7 @@ def read_record(paths):
         valid = (record["format"] == FORMAT and isinstance(record["executable"], str)
                  and root.is_absolute() and isinstance(files, dict)
                  and isinstance(record.get("extract_and_run", False), bool)
-                 and set(files) in ({str(root / LAUNCHER), str(root / ICON)},
-                                   {str(root / LEGACY_LAUNCHER), str(root / LEGACY_ICON)})
+                 and set(files) == {str(root / LAUNCHER), str(root / ICON)}
                  and all(isinstance(item.get("sha256"), str) for item in files.values()))
     except (KeyError, TypeError, AttributeError):
         valid = False
@@ -382,13 +363,6 @@ def read_record(paths):
 def read_journal(paths):
     loc = locations(paths)
     journal = _read_json(loc["journal"], "registration journal")
-    legacy = _read_json(paths.state / LEGACY_ID / "launcher/journal.json", "old registration journal")
-    if legacy and legacy.get("status") in INTERRUPTED:
-        if journal and journal.get("status") in INTERRUPTED:
-            raise ValueError("Both menu journals need recovery; preserve both and resolve the conflict.")
-        journal = legacy
-    elif journal is None:
-        journal = legacy
     if journal is None:
         return None
     try:
@@ -410,12 +384,12 @@ def _allowed(paths, path, record=None, journal=None):
     roots = {(loc["root"], loc["launcher"]), (loc["root"], loc["icon"])}
     if record:
         old = Path(record["data_root"])
-        roots |= {(old, old / relative) for _, relative in recorded_files(record)}
+        roots |= {(old, old / relative) for relative in (LAUNCHER, ICON)}
     for item in (journal or {}).get("changes", []):
         root = Path(item.get("root", ""))
-        if root.is_absolute() and Path(item["path"]) in (root / LAUNCHER, root / ICON, root / LEGACY_LAUNCHER, root / LEGACY_ICON):
+        if root.is_absolute() and Path(item["path"]) in (root / LAUNCHER, root / ICON):
             roots.add((root, Path(item["path"])))
-    if path in (loc["record"], paths.state / LEGACY_ID / "launcher/registration.json"):
+    if path == loc["record"]:
         return paths.state
     for root, allowed in roots:
         if path == allowed:
@@ -518,15 +492,6 @@ def _summary(result):
 
 def _register(paths, request, record, result, ephemeral):
     loc, problems, notes = locations(paths), result["problems"], result["notes"]
-    legacy_owned = record and str(loc["root"] / LEGACY_LAUNCHER) in record["files"]
-    if not legacy_owned:
-        for relative in (LEGACY_LAUNCHER, LEGACY_ICON):
-            path = loc["root"] / relative
-            if path.exists() or path.is_symlink():
-                problems.append(f"{path} already exists without a matching old registration record. "
-                                "It is preserved; resolve it before adding another menu entry.")
-        if problems:
-            return
     explicit = request["executable"]
     extracted = False
     if explicit is None:
@@ -576,21 +541,6 @@ def _register(paths, request, record, result, ephemeral):
             continue
         if before.get("sha256") != after["sha256"] or before.get("mode") != after["mode"]:
             planned.append(_change(path, role, loc["root"], before, after))
-    if record and str(loc["launcher"]) not in record["files"]:
-        # A reviewed upgrade replaces the old owned entry rather than creating
-        # a second menu entry. Modified old files abort the entire transaction.
-        for role, relative in recorded_files(record):
-            path = Path(record["data_root"]) / relative
-            changes.safe_parents(path, loc["root"])
-            before = state_of(path)
-            if before["kind"] != "missing" and not _same(before, record["files"][str(path)]):
-                problems.append(f"{path} changed after registration. Resolve it before migrating the menu.")
-            elif before["kind"] != "missing":
-                planned.append(_change(path, role, loc["root"], before, {"kind": "missing"}))
-        old_record = record_path(paths)
-        if old_record != loc["record"]:
-            planned.append(_change(old_record, "registration-record", paths.state,
-                                   state_of(old_record), {"kind": "missing"}))
     if problems:
         return
     record_after = {"format": FORMAT, "executable": identity["path"], "data_root": str(loc["root"]),
@@ -634,7 +584,7 @@ def _remove(paths, record, result):
         return
     root, planned = Path(record["data_root"]), []
     result["executable"] = {"path": record["executable"], "kind": "recorded"}
-    for role, relative in recorded_files(record):
+    for role, relative in (("launcher", LAUNCHER), ("icon", ICON)):
         path = root / relative
         try:
             changes.safe_parents(path, root)
@@ -652,8 +602,9 @@ def _remove(paths, record, result):
         planned.append(_change(path, role, root, before, {"kind": "missing"}))
     if problems:
         return
-    record_before = state_of(record_path(paths))
-    planned.append(_change(record_path(paths), "registration-record", paths.state,
+    record_path = locations(paths)["record"]
+    record_before = state_of(record_path)
+    planned.append(_change(record_path, "registration-record", paths.state,
                            record_before, {"kind": "missing"}))
     result["changes"] = planned
     result["notes"].append("Removal keeps folders and leaves the program file itself untouched.")
@@ -711,15 +662,14 @@ def _private_directory(paths):
 def locked(paths):
     """Serialize registration; independent of theme transactions, which use their own lock."""
     _private_directory(paths)
-    old = paths.state / LEGACY_ID / "launcher/registration.lock"
-    locks = ([old] if old.parent.exists() else []) + [locations(paths)["lock"]]
-    with contextlib.ExitStack() as stack:
-        for path in locks:
-            changes.safe_parents(path, paths.state)
-            fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-            stack.callback(os.close, fd)
-            fcntl.flock(fd, fcntl.LOCK_EX)
+    path = locations(paths)["lock"]
+    changes.safe_parents(path, paths.state)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
         yield
+    finally:
+        os.close(fd)
 
 
 def _fsync_directory(path):
@@ -763,9 +713,9 @@ def _write(paths, path, state, record=None, journal=None):
     _fsync_directory(path.parent)
 
 
-def _write_journal(paths, journal, *, legacy=False):
+def _write_journal(paths, journal):
     data = (json.dumps(journal, indent=2, sort_keys=True) + "\n").encode()
-    path = paths.state / LEGACY_ID / "launcher/journal.json" if legacy else locations(paths)["journal"]
+    path = locations(paths)["journal"]
     changes.safe_parents(path, paths.state)
     fd, temporary = tempfile.mkstemp(prefix=".journal-", dir=path.parent)
     try:
@@ -838,17 +788,14 @@ def _apply(paths, reviewed, ephemeral):
 
 def _apply_recovery(paths, reviewed):
     journal, record = read_journal(paths), None
-    legacy_path = paths.state / LEGACY_ID / "launcher/journal.json"
-    old = _read_json(legacy_path, "old registration journal")
-    legacy = old is not None and old.get("id") == journal.get("id") and old.get("status") in INTERRUPTED
     journal["status"] = "recovery-needed"
-    _write_journal(paths, journal, legacy=legacy)
+    _write_journal(paths, journal)
     for item in reviewed["changes"]:
         if not _equal(state_of(item["path"]), item["before"]):
             raise ValueError(f"{item['path']} changed during recovery. Review recovery again.")
         _write(paths, item["path"], item["after"], record, journal)
     journal["status"] = "recovered"
-    _write_journal(paths, journal, legacy=legacy)
+    _write_journal(paths, journal)
     return {"status": "recovered", "operation": "recover", "id": journal.get("id")}
 
 
@@ -879,7 +826,7 @@ def status(paths):
         result["interrupted"] = {"operation": journal["operation"], "status": journal["status"],
                                  "created": journal.get("created", "")}
     if record is None:
-        for path in (loc["launcher"], loc["icon"], loc["root"] / LEGACY_LAUNCHER, loc["root"] / LEGACY_ICON):
+        for path in (loc["launcher"], loc["icon"]):
             with contextlib.suppress(OSError):
                 if state_of(path)["kind"] != "missing":
                     result["conflicts"].append(str(path))
@@ -895,7 +842,7 @@ def status(paths):
             result["commands"] = commands(record["executable"],
                                           extract_and_run=record.get("extract_and_run", False))
     root = Path(record["data_root"])
-    for role, relative in recorded_files(record):
+    for role, relative in (("launcher", LAUNCHER), ("icon", ICON)):
         path = root / relative
         try:
             current_state = state_of(path)
@@ -904,8 +851,7 @@ def status(paths):
         condition = ("missing" if current_state["kind"] == "missing" else
                      "unchanged" if _same(current_state, record["files"][str(path)]) else "modified")
         result["files"].append({"path": str(path), "role": role, "state": condition})
-    result["migration_needed"] = str(loc["launcher"]) not in record["files"]
-    result["repair_needed"] = result["migration_needed"] or bool(result["executable_problem"]) or any(
+    result["repair_needed"] = bool(result["executable_problem"]) or any(
         item["state"] == "missing" for item in result["files"]) or (
         result["supported"] and not result["current_matches"])
     return result

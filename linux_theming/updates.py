@@ -147,7 +147,7 @@ def directory(paths):
 
 
 def preferences_path(paths):
-    return paths.config / paths.app_id / "updates.json"
+    return paths.config / "linux-theming" / "updates.json"
 
 
 def _private_directory(paths, path):
@@ -1267,9 +1267,6 @@ def preferences(paths):
 
 
 def save_preferences(paths, **values):
-    from . import migration
-
-    migration.guard(paths)
     path = preferences_path(paths)
     changes.safe_parents(path, paths.config)
     if path.is_symlink():

@@ -26,19 +26,11 @@ GHOSTTY_COLORS = {
 }
 
 
-def split_block(text):
-    legacy_start, legacy_end = START.replace("linux-theming", "desktop-theming"), END.replace("linux-theming", "desktop-theming")
-    old = legacy_start in text or legacy_end in text
-    if old and (START in text or END in text):
-        raise ValueError("Both old and new managed blocks exist; resolve the conflict first.")
-    return _split_block(text, legacy_start, legacy_end) if old else _split_block(text, START, END)
-
-
 def has_block(text):
-    return any(marker in text for marker in (START, END, "# BEGIN desktop-theming", "# END desktop-theming"))
+    return START in text or END in text
 
 
-def _split_block(text, START, END):
+def split_block(text):
     if START not in text and END not in text:
         return text, ""
     pattern = re.compile(r"(?m)^" + re.escape(START) + r"\n.*?^" + re.escape(END) + r"\n?",

@@ -289,8 +289,7 @@ def render(c, rules=()):
 
 
 def transform(paths, path, text, c):
-    if any(marker in text for marker in (START, END, '/* BEGIN desktop-theming Rofi colors */',
-                                        '/* END desktop-theming Rofi colors */')):
+    if START in text or END in text:
         raise ValueError('Unowned Rofi palette block; restore its ownership record or resolve it before connecting.')
     report = inspect(paths, path, text)
     return formats.append(text, render(c, report['rules']))

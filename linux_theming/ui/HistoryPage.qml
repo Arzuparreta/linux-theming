@@ -92,7 +92,7 @@ ListView {
                 Icon {
                     anchors.centerIn: parent
                     visible: thumb.status !== Image.Ready
-                    name: card.modelData.migration ? "refresh" : card.themeInfo ? "palette" : "history"
+                    name: card.themeInfo ? "palette" : "history"
                     size: 20
                     color: Theme.textFaint
                 }
@@ -106,8 +106,7 @@ ListView {
                     Text {
                         height: 22
                         verticalAlignment: Text.AlignVCenter
-                        text: card.modelData.migration ? "Data migration to Linux Theming"
-                            : card.themeInfo ? ((card.themeInfo.wallpaper || "Default colors").split("/").pop()
+                        text: card.themeInfo ? ((card.themeInfo.wallpaper || "Default colors").split("/").pop()
                                 + " · " + (card.themeInfo.polarity === "light" ? "Light" : "Dark")
                                 + (card.themeInfo.effective === "safe" && card.themeInfo.wallpaper ? " · Default colors" : ""))
                             : "Theme change"
@@ -145,7 +144,7 @@ ListView {
                 }
                 Text {
                     Layout.fillWidth: true
-                    visible: card.latest && card.modelData.status === "applied" && !card.modelData.migration
+                    visible: card.latest && card.modelData.status === "applied"
                     text: "Undo returns to " + (card.modelData.previous_theme
                         ? ((card.modelData.previous_theme.wallpaper || "Default colors").split("/").pop() + " · " + (card.modelData.previous_theme.polarity === "light" ? "Light" : "Dark"))
                         : "your settings from before Linux Theming") + "."

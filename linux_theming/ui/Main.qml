@@ -287,7 +287,7 @@ ApplicationWindow {
             Layout.rightMargin: 20
             Layout.topMargin: visible ? 14 : 0
             spacing: 8
-            visible: window.recoveryNeeded || (!!s.migration.needed && !window.recoveryNeeded) || !!s.error || !!s.notice
+            visible: window.recoveryNeeded || !!s.error || !!s.notice
             Banner {
                 Layout.fillWidth: true
                 visible: window.recoveryNeeded
@@ -295,14 +295,6 @@ ApplicationWindow {
                 title: "An earlier change was interrupted"
                 body: "Recover it before applying another theme. Recovery shows exactly what will be restored."
                 Command { text: "Open recovery"; onClicked: window.page = 2 }
-            }
-            Banner {
-                Layout.fillWidth: true
-                visible: !!s.migration.needed && !window.recoveryNeeded
-                tone: "warning"
-                title: "Desktop Theming data can be moved"
-                body: s.migration.summary || ""
-                Command { objectName: "reviewDataMigration"; text: "Review migration…"; enabled: !s.busy; onClicked: controller.reviewMigration() }
             }
             Banner {
                 objectName: "messageBanner"
@@ -601,14 +593,6 @@ ApplicationWindow {
         subtitle: "Add a reversible entry to your application menu. Choose your own shortcut in your desktop's keyboard settings; no key binding is changed here."
         contentItem: ColumnLayout {
             spacing: 14
-            Banner {
-                Layout.fillWidth: true
-                visible: !!s.migration.needed
-                tone: "warning"
-                title: "Data migration available"
-                body: s.migration.summary || ""
-                Command { objectName: "migrateIdentity"; text: "Review migration…"; enabled: !s.busy; onClicked: { accessDialog.close(); controller.reviewMigration() } }
-            }
             Banner { Layout.fillWidth: true; visible: !!s.launcher.error; tone: "warning"; title: s.launcher.error || "" }
             Banner {
                 Layout.fillWidth: true
