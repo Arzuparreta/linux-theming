@@ -229,7 +229,9 @@ replaced version in turn; it is also available before restarting, to undo an
 update that has not been used yet. **Delete copy** removes it. A failed, cancelled or
 interrupted update leaves the AppImage untouched when it stops before the rename;
 after the rename the new version is installed and both versions are kept.
-Leftover downloads are removed by the next update. Switching uses the kept copy
+Leftover downloads are removed by the next update. Only files with the names the
+updater creates are ever deleted. A kept copy started directly from the update
+state folder is not updated; copy it to a folder such as `~/Applications` first. Switching uses the kept copy
 shown in the dialog; if another window replaced it meanwhile, nothing is switched. Theme profiles, history and menu entries are not changed:
 the menu entry keeps working because the path stays the same.
 

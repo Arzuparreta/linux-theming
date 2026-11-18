@@ -275,6 +275,14 @@ class UpdateDialogTests(unittest.TestCase):
             self.click("checkUpdates")
         self.assertFalse(self.enabled("installUpdate"))
 
+    def test_a_kept_copy_started_directly_is_explained(self):
+        kept = updates.directory(self.paths) / "previous/LinuxTheming-8.0.0-x86_64.AppImage"
+        self.target = dict(self.target, path=str(kept))
+        self.controller._disk["fingerprint"] = self.target["fingerprint"]
+        self.open()
+        self.assertTrue(self.visible("updateUnsupported"))
+        self.assertIn("~/Applications", self.update["problem"])
+
     def test_mirror_source_is_disclosed(self):
         self.assertFalse(self.visible("updateMirror"))
         self.controller.publish_update(mirror="https://mirror.example/linux-theming")

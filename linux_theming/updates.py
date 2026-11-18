@@ -293,23 +293,30 @@ class _Watch:
         # (a redirect, or one still resolving or connecting) is stopped too.
         while not self._done.wait(0.1):
             if not self.reason:
-                cancelled = self.cancelled()  # Outside the lock: it may take its own.
-                with self._lock:
-                    # One consistent view: start_body() changes these under the same lock.
-                    now, deadline = time.monotonic(), self.deadline
-                    if cancelled:
-                        reason = "cancelled"
-                    elif deadline is not None and now > deadline:
-                        reason = "deadline"
-                    elif self.speed_floor and self._slow(now):
-                        reason = "slow"
-                    else:
-                        continue
-                    self.reason = reason
+                try:
+                    self._evaluate()
+                except Exception:  # Never die silently: stop the request instead.
+                    with self._lock:
+                        self.reason = self.reason or "failed"
+            if not self.reason:
+                continue
             with self._lock:
                 sockets = list(self.sockets)
             for sock in sockets:
                 self._stop(sock)
+
+    def _evaluate(self):
+        """Decide whether to stop, from one consistent view of the request's state."""
+        cancelled = self.cancelled()  # Outside the lock: it may take its own.
+        with self._lock:
+            # start_body() changes these under the same lock.
+            now, deadline = time.monotonic(), self.deadline
+            if cancelled:
+                self.reason = "cancelled"
+            elif deadline is not None and now > deadline:
+                self.reason = "deadline"
+            elif self.speed_floor and self._slow(now):
+                self.reason = "slow"
 
     def start_body(self):
         """Headers arrived: replace the overall deadline by the minimum speed."""
@@ -334,6 +341,9 @@ class _Watch:
     def stopped(self, what):
         if self.reason == "cancelled":
             return Cancelled("The update was cancelled. Nothing was replaced.")
+        if self.reason == "failed":
+            return UpdateError(f"The request to {self.name} was stopped after an internal error. "
+                               "Nothing was replaced; try again.")
         if self.reason == "slow":
             return UpdateError("The download is too slow to finish (under 1 KB/s for a minute). "
                                "Nothing was replaced; try again later.")
@@ -800,12 +810,31 @@ def _staging(target):
     return path.parent / f".{path.name}.{secrets.token_hex(6)}.download"
 
 
+# Only names this module creates are ever deleted.
+STAGED_NAME = r"\.{name}\.[0-9a-f]{{12}}\.download"
+KEPT_NAME = re.compile(r"LinuxTheming-(0|[1-9]\d{0,3})\.(0|[1-9]\d{0,3})\.(0|[1-9]\d{0,3})-[A-Za-z0-9_]+\.(AppImage|json)")
+
+
 def _remove_leftovers(target):
     path = Path(target["path"])
-    for leftover in path.parent.glob(f".{path.name}.*.download"):
+    staged = re.compile(STAGED_NAME.format(name=re.escape(path.name)))
+    for leftover in path.parent.glob(f".{glob_escape(path.name)}.*.download"):
         with contextlib.suppress(OSError):
-            if leftover.lstat().st_uid == os.getuid() and stat.S_ISREG(leftover.lstat().st_mode):
+            info = leftover.lstat()
+            if staged.fullmatch(leftover.name) and info.st_uid == os.getuid() and stat.S_ISREG(info.st_mode):
                 leftover.unlink()
+
+
+def glob_escape(name):
+    return re.sub(r"([*?\[])", r"[\1]", name)
+
+
+def _remove_kept(folder, keep=()):
+    """Delete kept copies and their records, nothing else the folder may hold."""
+    for other in folder.iterdir():
+        if (other.name not in keep and KEPT_NAME.fullmatch(other.name) and not other.is_symlink()
+                and other.is_file()):
+            other.unlink(missing_ok=True)
 
 
 def _copy_hashed(stream, staged, size, *, progress, cancelled, phase, what="AppImage", network=True, watch=None):
@@ -982,10 +1011,7 @@ def _forget_kept(record):
 def _commit_previous(paths, record):
     """After the replacement: keep only the copy of the version just replaced."""
     folder = directory(paths) / "previous"
-    keep = {Path(record["path"]).name, Path(record["path"]).with_suffix(".json").name}
-    for other in folder.iterdir():
-        if other.name not in keep and not other.is_symlink() and other.is_file():
-            other.unlink(missing_ok=True)
+    _remove_kept(folder, keep={Path(record["path"]).name, Path(record["path"]).with_suffix(".json").name})
     (directory(paths) / "previous.json").unlink(missing_ok=True)  # Format before 0.9.0's release.
     changes.sync_directory(folder)
 
@@ -1043,11 +1069,29 @@ def _replace(target, staged, identity):
     return fingerprint
 
 
+def inside_state(paths, path):
+    """Whether ``path`` is one of this updater's own files (for example a kept copy started directly)."""
+    try:
+        return Path(os.path.realpath(path)).is_relative_to(Path(os.path.realpath(directory(paths))))
+    except (OSError, ValueError):
+        return False
+
+
+def state_problem(paths, path):
+    if path and inside_state(paths, path):
+        return (f"{path} is one of the copies Linux Theming keeps for switching back, and is replaced or "
+                "deleted by updates. Copy it to a folder such as ~/Applications and start it from there "
+                "to update it.")
+    return ""
+
+
 def install(paths, release, target, *, progress=lambda *_: None, cancelled=lambda: False,
             environ=None, transport=None):
     """Download, verify and install a release that check() reported as available."""
     if release.get("status") != "available" or target.get("problem") or not target.get("path"):
         raise UpdateError("There is no verified update to install.")
+    if state_problem(paths, target["path"]):
+        raise UpdateError(state_problem(paths, target["path"]))
     asset = release["asset"]
     with _locked(paths):
         _unchanged(target)
@@ -1102,6 +1146,8 @@ def restore(paths, target, *, current=__version__, expected=None, progress=lambd
     """
     if target.get("problem") or not target.get("path"):
         raise UpdateError(target.get("problem") or "This copy cannot be replaced.")
+    if state_problem(paths, target["path"]):
+        raise UpdateError(state_problem(paths, target["path"]))
     with _locked(paths):
         # Validated before any kept file is listed, read or run.
         _private_directory(paths, directory(paths) / "previous")
@@ -1150,9 +1196,7 @@ def discard_previous(paths, *, current=__version__, expected=None):
             raise UpdateError("The kept copy changed after you reviewed it. Nothing was deleted; review it again.")
         folder = directory(paths) / "previous"
         if folder.is_dir() and not folder.is_symlink():
-            for other in folder.iterdir():
-                if not other.is_symlink() and other.is_file():
-                    other.unlink(missing_ok=True)
+            _remove_kept(folder)
         (directory(paths) / "previous.json").unlink(missing_ok=True)
 
 

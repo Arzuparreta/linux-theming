@@ -376,6 +376,8 @@ class Controller(QObject):
 
     def current_target(self):
         target = updates.installation()
+        if not target["problem"] and updates.state_problem(self.paths, target["path"]):
+            return dict(target, problem=updates.state_problem(self.paths, target["path"]))
         known = self._disk.get("fingerprint")
         if not target["problem"] and known and target["fingerprint"] != known:
             target = dict(target, problem=f"{target['path']} was replaced outside this window, so the version "

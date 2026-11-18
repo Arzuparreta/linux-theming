@@ -402,6 +402,19 @@ class UpdateTests(unittest.TestCase):
             self.assertEqual(right.recv(1), b"")  # Shut down: the peer sees EOF.
         self.assertEqual(watch.reason, "cancelled")
 
+    def test_an_error_inside_the_watcher_stops_the_request(self):
+        def broken():
+            raise RuntimeError("unexpected")
+        left, right = socket.socketpair()
+        self.addCleanup(left.close)
+        self.addCleanup(right.close)
+        with updates._Watch(broken, 60) as watch:
+            watch.register(left)
+            right.settimeout(5)
+            self.assertEqual(right.recv(1), b"")  # Shut down rather than left running.
+        self.assertEqual(watch.reason, "failed")
+        self.assertIn("internal error", str(watch.stopped("release information")))
+
     def test_errors_name_the_configured_source(self):
         self.server.status = 404
         with self.assertRaisesRegex(updates.UpdateError, "127.0.0.1 has no published release information"):
@@ -691,6 +704,33 @@ class UpdateTests(unittest.TestCase):
         with self.assertRaisesRegex(updates.UpdateError, "changed since it was saved"):
             updates.restore(self.paths, self.target(), current="9.0.0")
         self.assertEqual(self.installed.read_bytes(), self.server.body)
+
+    def test_only_files_the_updater_named_are_deleted(self):
+        foreign = self.apps / f".{NAME}.important.download"
+        foreign.write_text("not ours")
+        self.install()
+        folder = updates.directory(self.paths) / "previous"
+        notes = folder / "notes.txt"
+        lookalike = folder / "LinuxTheming-backup.AppImage"
+        notes.write_text("mine")
+        lookalike.write_text("mine")
+        updates.restore(self.paths, self.target(), current="9.0.0")
+        updates.discard_previous(self.paths, current="8.0.0")
+        self.assertEqual((foreign.read_text(), notes.read_text(), lookalike.read_text()), ("not ours", "mine", "mine"))
+        self.assertEqual(updates.read_previous(self.paths, "8.0.0"), {})
+
+    def test_a_kept_copy_started_directly_is_not_updated_or_deleted(self):
+        self.install()
+        kept = Path(updates.read_previous(self.paths, "9.0.0")["path"])
+        info = kept.stat()
+        target = {"path": str(kept), "problem": "", "size": info.st_size,
+                  "fingerprint": f"{info.st_dev}:{info.st_ino}:{info.st_mtime_ns}", "extract_and_run": False}
+        with self.assertRaisesRegex(updates.UpdateError, "copies Linux Theming keeps"):
+            self.install(target=target)
+        with self.assertRaisesRegex(updates.UpdateError, "copies Linux Theming keeps"):
+            updates.restore(self.paths, target, current="8.0.0")
+        self.assertTrue(kept.is_file())
+        self.assertEqual(updates.read_previous(self.paths, "9.0.0")["path"], str(kept))
 
     def test_discard_previous(self):
         self.install()
