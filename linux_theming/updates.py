@@ -168,9 +168,12 @@ def _private_directory(paths, path):
     changes.private_parents(path)
     for folder in (directory(paths), path):
         info = os.lstat(folder)
-        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
-            raise UpdateError(f"{folder} can be used by other users or is not your own folder. Nothing was "
-                              f"changed; make it private (chmod 700 '{folder}') and try again.")
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+            raise UpdateError(f"{folder} is not a folder of yours. Nothing was changed; move it aside so "
+                              "Linux Theming can create its own, then try again.")
+        if info.st_mode & 0o077:
+            raise UpdateError(f"{folder} can be used by other users. Nothing was changed; make it private "
+                              f"(chmod 700 '{folder}') and try again.")
     shared = modifiable_by_others(path)
     if shared is not None:
         raise UpdateError(f"{shared} can be changed by other users, so files Linux Theming runs from {path} "
@@ -964,8 +967,11 @@ def kept_folder_problem(paths):
                     "regular folder of yours, moving its contents there, to see them again.")
     for candidate in (directory(paths), folder):
         if candidate.exists() and not _private_folder(candidate):
-            return (f"Kept copies are not offered because {candidate} can be used by other users or is not "
-                    f"your own folder. Make it private (chmod 700 '{candidate}') to see them again.")
+            if os.lstat(candidate).st_uid != os.getuid() or not candidate.is_dir():
+                return (f"Kept copies are not offered because {candidate} is not a folder of yours. Move it "
+                        "aside so Linux Theming can create its own.")
+            return (f"Kept copies are not offered because {candidate} can be used by other users. Make it "
+                    f"private (chmod 700 '{candidate}') to see them again.")
     if folder.exists():
         shared = modifiable_by_others(folder)
         if shared is not None:

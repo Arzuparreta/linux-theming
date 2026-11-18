@@ -927,6 +927,21 @@ class UpdateTests(unittest.TestCase):
             self.install()
         self.assertIn(b"old", self.installed.read_bytes()[:16])
 
+    def test_a_state_folder_of_another_account_gets_ownership_guidance(self):
+        state = updates.directory(self.paths)
+        state.mkdir(parents=True, mode=0o700)
+        real = os.lstat
+
+        def foreign(path, *args, **options):
+            if Path(path) == state:
+                return os.stat_result((stat.S_IFDIR | 0o700, 0, 0, 2, os.getuid() + 1, 0, 0, 0, 0, 0))
+            return real(path, *args, **options)
+        with patch("linux_theming.updates.os.lstat", side_effect=foreign):
+            with self.assertRaisesRegex(updates.UpdateError, "is not a folder of yours") as raised:
+                self.install()
+            self.assertNotIn("chmod", str(raised.exception))
+            self.assertIn("is not a folder of yours", updates.kept_folder_problem(self.paths))
+
     def test_install_reports_the_installed_file_identity(self):
         result = self.install()
         info = self.installed.stat()
