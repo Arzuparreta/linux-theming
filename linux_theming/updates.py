@@ -237,6 +237,9 @@ class _Watch:
         self.cancelled = cancelled
         self.deadline = None if seconds is None else time.monotonic() + seconds
         self.sockets, self.reason = [], ""
+        self.speed_floor = False  # Set for downloads: stop below SLOW_BYTES per SLOW_WINDOW.
+        self.received = 0
+        self._window = (time.monotonic(), 0)
         self._lock = threading.Lock()
         self._done = threading.Event()
         self._thread = threading.Thread(target=self._run, name="update-watch", daemon=True)
@@ -281,10 +284,13 @@ class _Watch:
         # (a redirect, or one still resolving or connecting) is stopped too.
         while not self._done.wait(0.1):
             if not self.reason:
+                now = time.monotonic()
                 if self.cancelled():
                     reason = "cancelled"
-                elif self.deadline is not None and time.monotonic() > self.deadline:
+                elif self.deadline is not None and now > self.deadline:
                     reason = "deadline"
+                elif self.speed_floor and self._slow(now):
+                    reason = "slow"
                 else:
                     continue
                 with self._lock:
@@ -294,9 +300,23 @@ class _Watch:
             for sock in sockets:
                 self._stop(sock)
 
+    def _slow(self, now):
+        # Measured here, not after each read: a stall inside the HTTP framing can keep a
+        # read waiting while bytes still trickle in under the socket timeout.
+        started, count = self._window
+        if now - started < SLOW_WINDOW:
+            return False
+        if self.received - count < SLOW_BYTES:
+            return True
+        self._window = (now, self.received)
+        return False
+
     def stopped(self, what):
         if self.reason == "cancelled":
             return Cancelled("The update was cancelled. Nothing was replaced.")
+        if self.reason == "slow":
+            return UpdateError("The download is too slow to finish (under 1 KB/s for a minute). "
+                               "Nothing was replaced; try again later.")
         if self.reason == "deadline":
             return UpdateError(f"GitHub did not finish sending the {what} in time. Try again later.")
         return None
@@ -310,8 +330,9 @@ def _connect(watch, address, timeout=None, source_address=None):
     for family, kind, proto, _name, target in socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM):
         if watch.reason:
             break
-        sock = socket.socket(family, kind, proto)
+        sock = None
         try:
+            sock = socket.socket(family, kind, proto)  # An unsupported family falls back to the next.
             watch.register(sock)
             if source_address:
                 sock.bind(source_address)
@@ -332,7 +353,8 @@ def _connect(watch, address, timeout=None, source_address=None):
             return sock
         except OSError as exc:
             error = exc
-            sock.close()
+            if sock is not None:
+                sock.close()
     raise error or OSError("The request was stopped before connecting.")
 
 
@@ -753,14 +775,13 @@ def _remove_leftovers(target):
                 leftover.unlink()
 
 
-def _copy_hashed(stream, staged, size, *, progress, cancelled, phase, what="AppImage", network=True):
+def _copy_hashed(stream, staged, size, *, progress, cancelled, phase, what="AppImage", network=True, watch=None):
     digest, received = hashlib.sha256(), 0
     try:
         fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     except OSError as exc:
         raise UpdateError(f"{staged} cannot be created: {exc.strerror}. Nothing was replaced.") from None
     read = getattr(stream, "read1", stream.read)  # Returns what has arrived, so cancel is checked often.
-    window_start, window_bytes = time.monotonic(), 0
     with os.fdopen(fd, "wb") as output:
         written = os.fstat(output.fileno())
         while True:
@@ -771,20 +792,20 @@ def _copy_hashed(stream, staged, size, *, progress, cancelled, phase, what="AppI
             except (OSError, http.client.HTTPException) as exc:
                 if cancelled():
                     raise Cancelled("The update was cancelled. Nothing was replaced.") from None
+                if watch is not None and watch.stopped(what):
+                    raise watch.stopped(what) from None
                 if network:
                     raise _explain(exc, what) from exc
                 raise UpdateError(f"The {what} cannot be read: {exc}. Nothing was replaced.") from exc
             if not block:
                 if cancelled():  # A cancel that shut the connection down ends the read with EOF.
                     raise Cancelled("The update was cancelled. Nothing was replaced.")
+                if watch is not None and watch.stopped(what):
+                    raise watch.stopped(what)
                 break
             received += len(block)
-            window_bytes += len(block)
-            if network and time.monotonic() - window_start >= SLOW_WINDOW:
-                if window_bytes < SLOW_BYTES:
-                    raise UpdateError("The download is too slow to finish (under 1 KB/s for a minute). "
-                                      "Nothing was replaced; try again later.")
-                window_start, window_bytes = time.monotonic(), 0
+            if watch is not None:
+                watch.received = received
             if received > size:
                 raise UpdateError("The download is larger than the release states. Nothing was replaced.")
             digest.update(block)
@@ -973,6 +994,7 @@ def install(paths, release, target, *, progress=lambda *_: None, cancelled=lambd
         staged = _staging(target)
         try:
             with _Watch(cancelled) as watch:
+                watch.speed_floor = True
                 try:
                     response = transport.open(_request(asset["url"], "application/octet-stream"), timeout=TIMEOUT)
                 except (OSError, http.client.HTTPException) as exc:
@@ -984,7 +1006,7 @@ def install(paths, release, target, *, progress=lambda *_: None, cancelled=lambd
                     if declared is not None and declared.strip() != str(asset["size"]):
                         raise UpdateError("The download size differs from the release. Nothing was replaced.")
                     checksum, identity = _copy_hashed(response, staged, asset["size"], progress=progress,
-                                                      cancelled=cancelled, phase="download")
+                                                      cancelled=cancelled, phase="download", watch=watch)
             if checksum != asset["sha256"]:
                 raise UpdateError("The download does not match the release checksum. Nothing was replaced.")
             progress("verify", 0, 0)

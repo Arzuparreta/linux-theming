@@ -50,6 +50,7 @@ class Release(http.server.ThreadingHTTPServer):
         self.slow = False
         self.crawl = False
         self.crawl_headers = False
+        self.chunk_stall = False
         self.status = 200
         self.headers = {}
         self.requests = []
@@ -97,6 +98,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             body = json.dumps(server.release()).encode()
         elif self.path == f"/releases/download/{tag}/{NAME}.sha256":
             body = (server.checksum_text or f"{server.checksum}  {NAME}\n").encode()
+        elif self.path == f"/releases/download/{tag}/{NAME}" and server.chunk_stall:
+            # A chunk-size line that never ends: reads wait inside the HTTP framing.
+            self.protocol_version = "HTTP/1.1"
+            self.send_response(200)
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            with contextlib.suppress(OSError):
+                for byte in b"10000;" + b"x" * 2000:
+                    self.wfile.write(bytes([byte]))
+                    self.wfile.flush()
+                    time.sleep(0.02)
+            return
         elif self.path == f"/releases/download/{tag}/{NAME}":
             body = server.served
         else:
@@ -570,6 +583,30 @@ class UpdateTests(unittest.TestCase):
               self.assertRaisesRegex(updates.UpdateError, "too slow")):
             self.install()
         self.assertEqual(self.leftovers(), [])
+
+    def test_a_stall_inside_the_http_framing_meets_the_speed_floor(self):
+        self.server.chunk_stall = True
+        started = time.monotonic()
+        with (patch.multiple(updates, SLOW_WINDOW=0.3, SLOW_BYTES=1 << 30),
+              self.assertRaisesRegex(updates.UpdateError, "too slow")):
+            self.install()
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual(self.leftovers(), [])
+
+    def test_an_unsupported_address_family_falls_back_to_the_next_address(self):
+        real_resolve, real_socket = socket.getaddrinfo, socket.socket
+        port = self.server.server_port
+
+        def resolve(host, *args, **options):
+            ipv4 = real_resolve(host, *args, **options)
+            return [(socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("::1", port, 0, 0))] + ipv4
+
+        def make(family=-1, *args, **options):
+            if family == socket.AF_INET6:
+                raise OSError(errno.EAFNOSUPPORT, "Address family not supported by protocol")
+            return real_socket(family, *args, **options)
+        with patch("socket.getaddrinfo", side_effect=resolve), patch("linux_theming.updates.socket.socket", side_effect=make):
+            self.assertEqual(self.check()["status"], "available")
 
     def test_cancelling_a_trickling_download_is_prompt(self):
         self.server.slow = True
