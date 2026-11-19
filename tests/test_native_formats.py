@@ -106,7 +106,7 @@ class NativeFormatTests(unittest.TestCase):
         gtk.gtk_css_provider_load_from_data.restype = ctypes.c_int
         gtk.g_object_unref.argtypes = [ctypes.c_void_p]
         value = theme.palette(service.DEFAULT_PROFILE)
-        for component in ("gtk3", "gtk4", "wofi", "waybar"):
+        for component in ("gtk3", "gtk4", "wofi", "waybar", "thunar"):
             with self.subTest(component=component):
                 provider = gtk.gtk_css_provider_new()
                 error = ctypes.c_void_p()

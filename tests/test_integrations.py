@@ -3,6 +3,7 @@
 import copy
 import json
 import os
+import re
 import tempfile
 import tomllib
 import unittest
@@ -33,6 +34,7 @@ EXAMPLES = {
     "mako": "font=monospace 13\nbackground-color=#123456\n[app-name=chat]\ninvisible=1\n",
     "gtk3": "entry { font-size: 14px; }\n@define-color theme_bg_color #123456;\n",
     "gtk4": "entry { font-size: 14px; }\n@define-color window_bg_color #123456;\n",
+    "thunar": "entry { font-size: 14px; }\n.thunar .sidebar { background-color: #123456; }\n",
     "qt": "[Appearance]\nicon_theme=breeze\nstyle=Fusion\ncustom_palette=false\n",
     "zsh": "# My prompt\nPROMPT='%n@%m %~ %# '\nalias ll='ls -l'\n",
     "fish": "function fish_prompt\n  echo 'my prompt> '\nend\nset -g fish_color_command 123456\n",
@@ -132,10 +134,24 @@ class IntegrationTests(unittest.TestCase):
                 "sway": "output eDP-1 scale 1.5", "hyprland": "gaps_in = 7", "plasma": "Theme=breeze",
                 "polybar": "modules-left=workspaces", "waybar": "font-family: monospace", "rofi": 'font: "monospace 13"',
                 "wofi": "padding: 8px", "dunst": "foreground=#abcdef", "mako": "invisible=1",
-                "gtk3": "font-size: 14px", "gtk4": "font-size: 14px", "qt": "icon_theme=breeze",
+                "gtk3": "font-size: 14px", "gtk4": "font-size: 14px", "thunar": "font-size: 14px",
+                "qt": "icon_theme=breeze",
                 "zsh": "PROMPT='%n@%m %~ %# '", "fish": "my prompt> "}.items():
             self.assertIn(preference, originals[component].read_text(), component)
             self.assertEqual(originals[component].stat().st_mode & 0o777, 0o640)
+
+    def test_gtk3_menus_and_header_bars_set_text_with_their_backgrounds(self):
+        # Themes such as Adwaita give these their own background but no text color,
+        # so the window's palette text color would otherwise reach them.
+        text = theme.render("gtk3", theme.palette(self.profile))
+        found = {selector.strip(): body for selectors, body in re.findall(r"([^{}]+)\{([^{}]*)\}", text)
+                 for selector in selectors.split(",")}
+        for selector in ("menu", ".menu", ".context-menu", "headerbar", ".titlebar", "headerbar button"):
+            self.assertRegex(found[selector], r"background-color: #\w{6};", selector)
+            self.assertRegex(found[selector], r"(?:^|;)\s*color: #\w{6};", selector)
+        self.assertIn("background-color: transparent", found["headerbar button.titlebutton"])
+        self.assertIn("@define-color theme_unfocused_selected_bg_color", text)
+        self.assertNotIn("menu", theme.render("gtk4", theme.palette(self.profile)))
 
     def test_shared_sway_color_and_background_ownership_composes_and_disconnects_independently(self):
         from PIL import Image
@@ -174,6 +190,7 @@ class IntegrationTests(unittest.TestCase):
             "alacritty": (lambda text: text.replace("size = 13.5", "size = 14.0"), "size = 14.0"),
             "i3": (lambda text: "# later\n" + text + "bindsym $mod+d exec rofi\n", "bindsym $mod+d exec rofi"),
             "gtk3": (lambda text: "label { margin: 2px; }\n" + text, "label { margin: 2px; }"),
+            "thunar": (lambda text: text + "label { margin: 3px; }\n", "label { margin: 3px; }"),
             "zsh": (lambda text: text + "alias gs='git status'\n", "alias gs='git status'"),
         }
         for component, (edit, marker) in edits.items():

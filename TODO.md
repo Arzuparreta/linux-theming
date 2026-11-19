@@ -48,6 +48,7 @@ remaining acceptance gates:
 - [x] Session-selected live wallpaper adapters and reviewed Swaybg background configuration.
 - [x] Separate GTK 3/4 CSS, native GNOME mode/accent and Xfce installed theme counterparts.
 - [x] KDE application color roles and qt5ct/qt6ct palettes with separate capability/validation records.
+- [x] Thunar file manager windows through rules limited to Thunar in GTK 3 user CSS, validated with real Thunar.
 - [x] i3/Sway/Hyprland border roles and shared Sway/background file composition.
 - [ ] Verify every new adapter's actual appearance in disposable real desktop sessions.
 - [ ] Improve discovery for custom config locations, Flatpak and runtime desktop settings.
