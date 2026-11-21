@@ -1,7 +1,6 @@
 # Roadmap
 
-Product direction: [docs/DIRECTION.md](docs/DIRECTION.md). The ThinkPad dotfiles
-are one historical example, not the architecture or a required desktop stack.
+Product direction: [docs/DIRECTION.md](docs/DIRECTION.md).
 
 ## Delivered foundation
 

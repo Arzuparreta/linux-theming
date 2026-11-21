@@ -200,7 +200,7 @@ def main():
     metadata["source_hashes"] = {str(p.relative_to(options.source)): hashlib.sha256(p.read_bytes()).hexdigest()
                                  for p in sorted((options.source / "linux_theming").rglob("*"))
                                  if p.suffix in (".py", ".qml")}
-    metadata["source_hashes"]["bin/walltheme"] = hashlib.sha256((options.source / "bin/walltheme").read_bytes()).hexdigest()
+    metadata["source_hashes"]["linux_theming/palette.py"] = hashlib.sha256((options.source / "linux_theming/palette.py").read_bytes()).hexdigest()
     mounts = []
     for line in Path("/proc/self/mountinfo").read_text().splitlines():
         mount = Path(line.split()[4])

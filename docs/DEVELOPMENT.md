@@ -20,6 +20,7 @@ MCP and a small fallback CLI for agents are future adapters.
 - `linux_theming/integrations.py`, `formats.py`: native file adapters, conservative editors and shared-file composition.
 - `linux_theming/appearance.py`: read-only native appearance probes and reviewed GNOME/Xfce preferences.
 - `linux_theming/wallpaper.py`: read-only session probes, explicit setters and restoration checks.
+- `linux_theming/palette.py`: accessible wallpaper-to-palette color engine.
 - `linux_theming/theme.py`: palette engine access and terminal renderers.
 - `linux_theming/service.py`: profile validation and reviewed plan generation/application.
 - `linux_theming/changes.py`: conflict checks, file replacement and undo journals.
@@ -27,12 +28,9 @@ MCP and a small fallback CLI for agents are future adapters.
 - `linux_theming/autoreload.py`: reversible native Alacritty/Waybar watcher preferences.
 - `linux_theming/merge.py`: three-way line and INI key merges that keep later outside edits.
 - `linux_theming/paths.py`: HOME/XDG data locations.
-- `bin/walltheme`, `config/`, `scripts/install-thinkpad.sh`: original legacy workflow.
-- `install.sh`, `scripts/install-platform.py`: describe GUI launch options and refuse automatic installation;
-  legacy installation requires an explicit `--thinkpad` choice.
+- `install.sh`, `scripts/install-platform.py`: describe GUI launch options and refuse automatic installation.
 
-The palette engine is reused without calling its application hooks. The new
-platform does not invoke pywal, legacy apply hooks or signal applications.
+The platform does not invoke pywal or signal applications.
 Wallpaper setters run only for explicitly reviewed application/restoration, never
 during discovery or preview. See [adapter support and limitations](WALLPAPER.md).
 
@@ -66,7 +64,7 @@ profile's `resolutions`. See [configuration semantics](CONFIGURATION.md). The en
 ```sh
 python3 -m unittest discover -s tests -v
 ruff check linux_theming tests scripts/install-platform.py
-bash -n install.sh scripts/install-thinkpad.sh
+bash -n install.sh
 ```
 
 KDE adapters are also tested against real KDE files (`tests/fixtures/kde`,
@@ -103,7 +101,6 @@ undo order, disconnection and normal installation without desktop changes.
   window pixels and Kitty queries to verify apply/undo without restarts or repeat
   `exec_always`. Needs existing Xvfb, i3, Kitty 0.47+ and Alacritty 0.14+; installs
   nothing. Other app runtime claims remain limited as documented in INTEGRATIONS.md.
-- Original ThinkPad workflow: preserved; never reapplied to validate this engine.
 - CI is configured for Python 3.11 and 3.14; local checks do not establish CI success.
 
 ## Transaction behavior

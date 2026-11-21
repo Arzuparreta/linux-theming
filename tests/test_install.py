@@ -18,8 +18,8 @@ class InstallTests(unittest.TestCase):
                               env=dict(os.environ, HOME=str(self.home)),
                               capture_output=True, text=True, check=False)
 
-    def test_default_and_legacy_preview_do_not_write(self):
-        for args in ((), ("--dry-run",), ("--thinkpad",)):
+    def test_default_preview_does_not_write(self):
+        for args in ((), ("--dry-run",)):
             result = self.install(*args)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(list(self.home.iterdir()), [])

@@ -61,10 +61,7 @@ PyInstaller builds a relocatable **one-directory** payload. Appimagetool wraps
 that directory once, avoiding a second self-extracting Python archive. The custom
 QtQml hook includes the modules used by the application and file dialogs with the
 Basic style. It excludes unused WebEngine, 3D and other style modules before
-binary dependency analysis. X11 and Wayland plugins remain included. Resources
-are loaded relative to the bundled module, not a source checkout or `/usr`.
-The palette resource `bin/walltheme` is included for its pure palette functions;
-its legacy application entry point and apply hooks are never invoked.
+binary dependency analysis. X11 and Wayland plugins remain included. Resources are loaded relative to the bundled module, not a source checkout or `/usr`.
 
 Frozen QML loads through a Qt resource URL whose namespace is the SHA-256 of the
 UI paths and contents. AppImage mount directories change on each launch; file

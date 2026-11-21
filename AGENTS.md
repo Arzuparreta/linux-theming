@@ -11,8 +11,6 @@ Read `docs/DIRECTION.md` before choosing product scope or architecture.
 - Show exact changes before application, retain undo data, and reject conflicts
   rather than overwriting later user edits. Do not follow config symlinks into
   a dotfiles repository when writing.
-- Keep `bin/walltheme` and `--thinkpad` installation explicitly documented as
-  the legacy workflow. The new platform must not call its apply hooks.
 - Document which integrations are discovery-only and which can apply themes.
 - Run `python3 -m unittest discover -s tests -v`, `ruff check linux_theming
   tests`, and `bash -n install.sh` for changes to the new platform.

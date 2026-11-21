@@ -1,12 +1,9 @@
-"""Use the original color engine without importing or calling its apply hooks."""
+"""Palette engine access and terminal renderers."""
 
 import copy
 import hashlib
-import importlib.machinery
-import importlib.util
 import threading
 from collections import OrderedDict
-from functools import lru_cache
 from pathlib import Path
 
 _LOCK = threading.RLock()
@@ -15,24 +12,14 @@ _ANALYSES = OrderedDict()
 MAX_PREVIEWS = 32
 
 
-@lru_cache(maxsize=1)
-def _load_engine(path, identity):
-    loader = importlib.machinery.SourceFileLoader("linux_theming_palette", path)
-    spec = importlib.util.spec_from_loader(loader.name, loader)
-    module = importlib.util.module_from_spec(spec)
-    loader.exec_module(module)
-    return module
-
-
 def engine():
     try:
         # Keep the dependency check explicit, even after the pure module is cached.
         import PIL  # noqa: F401
 
-        path = Path(__file__).resolve().parents[1] / "bin/walltheme"
-        info = path.stat()
-        with _LOCK:
-            return _load_engine(str(path), (info.st_mtime_ns, info.st_ctime_ns, info.st_size))
+        from . import palette as module
+
+        return module
     except ImportError as exc:
         raise ValueError("Palette generation needs Python Pillow. Install it explicitly "
                          "using your distribution's package manager.") from exc

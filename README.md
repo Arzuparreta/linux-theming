@@ -84,10 +84,10 @@ The product direction is in [docs/DIRECTION.md](docs/DIRECTION.md).
 - Standalone theme rendering for user-managed dotfiles, without writing files.
 
 Requires Linux and Python 3.11+. Palette generation additionally needs Pillow.
-The engine never installs packages, invokes legacy apply hooks, replaces the
-wallpaper during discovery/preview, or signals applications. Explicitly reviewed
-wallpaper changes use the active desktop API. No pywal, particular desktop environment,
-account or external service is required for the new engine.
+The engine never installs packages, replaces the wallpaper during
+discovery/preview, or signals applications. Explicitly reviewed wallpaper
+changes use the active desktop API. No pywal, particular desktop environment,
+account or external service is required.
 
 Normal `./install.sh` explains the launch options without changes;
 `./install.sh --apply` refuses automatic installation. Dependencies are installed
@@ -142,22 +142,6 @@ Respects `XDG_CONFIG_HOME` and `XDG_STATE_HOME`, with these normal defaults:
 
 Preserve ownership records and history to retain restoration data. They contain
 previous configuration contents and are written with private permissions.
-Discovery and palette previews do not create them. The engine does not adopt
-legacy `walltheme` state or component ownership automatically.
-
-## Original ThinkPad workflow
-
-The original i3/kitty/polybar/rofi/zsh setup remains explicitly legacy, documented
-in [docs/LEGACY.md](docs/LEGACY.md). It includes personal paths, scripts and
-bindings. Choosing it replaces complete configs:
-
-```sh
-./install.sh --thinkpad          # describe the legacy action; no changes
-./install.sh --thinkpad --apply  # explicitly select the legacy installer and apply hooks
-```
-
-Existing users can continue using `bin/walltheme` and the Mod+w menu with their
-original behavior. They do not use the engine's review/undo flow. The new engine
-never calls their apply hooks, and normal installation never invokes them.
+Discovery and palette previews do not create them.
 
 See [TODO.md](TODO.md) for the remaining work.

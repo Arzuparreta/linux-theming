@@ -26,7 +26,7 @@ class DailyEngineTests(unittest.TestCase):
             theme._PREVIEWS.clear()
             theme._ANALYSES.clear()
 
-    def test_one_analysis_and_legacy_palette_output_are_preserved(self):
+    def test_one_analysis_and_palette_output_are_preserved(self):
         module = theme.engine()
         for mode in ("adaptive", "safe"):
             for polarity in ("dark", "light"):
