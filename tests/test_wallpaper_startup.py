@@ -65,7 +65,13 @@ class WallpaperStartupSessionTests(unittest.TestCase):
         self.paths = Paths.current()
         self.config = config_root / 'i3/config'
         self.config.parent.mkdir(parents=True)
-        self.original = 'font pango:monospace 8\n# exec_always wal -R\nexec_always wal -R\n'
+        # Older i3 treats this minimal fixture as v3 without the version line.
+        self.original = (
+            '# i3 config file (v4)\n'
+            'font pango:monospace 8\n'
+            '# exec_always wal -R\n'
+            'exec_always --no-startup-id wal -R\n'
+        )
         self.config.write_text(self.original)
         self.old, self.first, self.second = [directory / name for name in ('old.png', 'first #1.png', 'second.png')]
         for image, color in zip((self.old, self.first, self.second), ('red', 'green', 'blue'), strict=True):
@@ -86,14 +92,29 @@ class WallpaperStartupSessionTests(unittest.TestCase):
             time.sleep(0.05)
         self.fail('i3 did not restore the reviewed wallpaper on the private display.')
 
+    def assert_wal_commands(self, expected):
+        # i3 double-forks each startup command. The IPC socket and the startup
+        # wallpaper marker can be ready before the independent wal process.
+        log = self.paths.home / 'wal.log'
+        commands = []
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if log.is_file():
+                commands = log.read_text().splitlines()
+                if len(commands) >= len(expected):
+                    break
+            time.sleep(0.05)
+        self.assertEqual(commands, expected)
+
     def test_login_restores_saved_copy_and_disable_reverts_only_owned_lines(self):
         with self.session():
+            self.assert_wal_commands(['-R'])
             plan = service.make_plan(self.paths, self.profile)
             self.assertEqual(self.config.read_text(), self.original)
             self.assertFalse(self.paths.data.exists())
             service.apply_reviewed(self.paths, plan)
             configured = self.config.read_text()
-            self.assertIn('\n# exec_always wal -R\nexec_always wal -R -n\n', configured)
+            self.assertIn('\n# exec_always wal -R\nexec_always --no-startup-id wal -R -n\n', configured)
             self.assertIn(wallpaper_startup.hook(self.paths), configured)
             saved = Path(plan['wallpaper_copy']['path'])
             self.assertEqual(saved.read_bytes(), self.first.read_bytes())
@@ -102,7 +123,7 @@ class WallpaperStartupSessionTests(unittest.TestCase):
         self.fehbg.unlink()
         with self.session():
             self.assertEqual(self.startup_image(), str(saved))
-            self.assertEqual((self.paths.home / 'wal.log').read_text().splitlines(), ['-R', '-R -n'])
+            self.assert_wal_commands(['-R', '-R -n'])
             next_profile = dict(self.profile, wallpaper=str(self.second))
             plan = service.make_plan(self.paths, next_profile)
             self.assertEqual(plan['wallpaper_action']['restore_args'][-1], str(saved))
