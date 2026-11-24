@@ -174,6 +174,10 @@ def restore(action):
         command([action['tool'], '--no-fehbg', *action['restore_args']])
         # X11 allocates a new pixmap when restoring the same image.
         action['before'] = read(action)
+        if action.get('startup_previous'):
+            from . import wallpaper_startup
+
+            wallpaper_startup.mark_restored(action, action['startup_previous'])
     else:
         for key, value in action['before'].items():
             check(action, 'after', partial=True)
@@ -182,8 +186,64 @@ def restore(action):
         check(action, 'before')
 
 
+def feh_restore_record(paths, action, root, fallback):
+    from . import changes, wallpaper_startup
+
+    image = wallpaper_startup.startup_image(paths, action, root['root'])
+    if image:
+        action['startup_previous'] = image
+        return ['--bg-fill', '--', image], [image]
+    for record in changes.history(paths):
+        if record['status'] != 'applied':
+            continue
+        journal = json.loads(paths.journal(record['id']).read_text())
+        previous = journal.get('wallpaper_action')
+        if (previous and previous['backend'] == 'feh' and previous['session'] == action['session']
+                and previous['after'] == root):
+            image = previous['image']
+            if image_digest(image) != previous['image_digest']:
+                raise ValueError('The previous applied wallpaper image changed.')
+            return ['--bg-fill', '--', image], [image]
+    return fallback or fehbg_record(paths)
+
+
+def fehbg_record(paths):
+    # Parse data, never source this shell script. Only feh's simple generated
+    # invocation is accepted, and --no-fehbg prevents writing through symlinks.
+    lines = [line for line in (paths.home / '.fehbg').read_text().splitlines()
+             if line.strip() and not line.startswith('#')]
+    if len(lines) != 1:
+        raise ValueError('No simple feh restoration record is available.')
+    args = shlex.split(lines[0])
+    if not args or Path(args.pop(0)).name != 'feh':
+        raise ValueError('Unsupported feh restoration command.')
+    flags, images = [], []
+    modes = ('--bg-fill', '--bg-scale', '--bg-center', '--bg-max', '--bg-tile')
+    while args:
+        arg = args.pop(0)
+        if arg == '--':
+            images = args
+            break
+        if arg == '--no-fehbg':
+            continue
+        if arg in (*modes, '--no-xinerama', '--force-aliasing'):
+            flags.append(arg)
+        elif arg in ('--image-bg', '--geometry', '--xinerama-index') and args:
+            flags.extend([arg, args.pop(0)])
+        elif Path(arg).is_absolute():
+            images = [arg, *args]
+            break
+        else:
+            raise ValueError('Unsupported feh restoration option.')
+    if (sum(flag in modes for flag in flags) != 1 or not images
+            or any(not Path(p).is_absolute() or not Path(p).is_file() for p in images)):
+        raise ValueError('Previous feh images or rendering options are unavailable.')
+    return [*flags, '--', *images], images
+
+
 def _probe(paths, image, backend, tool, **extra):
     action = dict(backend=backend, tool=tool, session=session_token(), before={}, **extra)
+    fallback = None
     if backend == 'gsettings':
         keys = command([tool, 'list-keys', action['schema']]).splitlines()
         image_key = action.pop('image_key')
@@ -204,54 +264,15 @@ def _probe(paths, image, backend, tool, **extra):
                 if base + '/' + setting in keys:
                     action['before'][base + '/' + setting] = None
     elif backend == 'feh':
-        # Parse data, never source this shell script. Only feh's simple generated
-        # invocation is accepted, and --no-fehbg prevents writing through symlinks.
-        lines = [line for line in (paths.home / '.fehbg').read_text().splitlines()
-                 if line.strip() and not line.startswith('#')]
-        if len(lines) != 1:
-            raise ValueError('No simple feh restoration record is available.')
-        args = shlex.split(lines[0])
-        if not args or Path(args.pop(0)).name != 'feh':
-            raise ValueError('Unsupported feh restoration command.')
-        flags, images = [], []
-        modes = ('--bg-fill', '--bg-scale', '--bg-center', '--bg-max', '--bg-tile')
-        while args:
-            arg = args.pop(0)
-            if arg == '--':
-                images = args
-                break
-            if arg == '--no-fehbg':
-                continue
-            if arg in (*modes, '--no-xinerama', '--force-aliasing'):
-                flags.append(arg)
-            elif arg in ('--image-bg', '--geometry', '--xinerama-index') and args:
-                flags.extend([arg, args.pop(0)])
-            elif Path(arg).is_absolute():
-                images = [arg, *args]
-                break
-            else:
-                raise ValueError('Unsupported feh restoration option.')
-        if (sum(flag in modes for flag in flags) != 1 or not images
-                or any(not Path(p).is_absolute() or not Path(p).is_file() for p in images)):
-            raise ValueError('Previous feh images or rendering options are unavailable.')
-        action['restore_args'] = [*flags, '--', *images]
-        action['prior_images'] = images
-        from . import changes
-        root = read(action)
-        for record in changes.history(paths):
-            if record['status'] != 'applied':
-                continue
-            journal = json.loads(paths.journal(record['id']).read_text())
-            previous = journal.get('wallpaper_action')
-            if (previous and previous['backend'] == 'feh' and previous['session'] == action['session']
-                    and previous['after'] == root):
-                action['restore_args'] = ['--bg-fill', '--', previous['image']]
-                action['prior_images'] = [previous['image']]
-                break
+        from . import wallpaper_startup
+
+        if not wallpaper_startup.asset_directory(paths).is_dir():
+            fallback = fehbg_record(paths)
     before = read(action)
     if not before:
         raise ValueError('No active wallpaper targets could be read.')
     if backend == 'feh':
+        action['restore_args'], action['prior_images'] = feh_restore_record(paths, action, before, fallback)
         if not re.search(r'0x[1-9a-fA-F][0-9a-fA-F]*', before['root']):
             # A fresh X11 session need not have a wallpaper pixmap yet. The
             # absence itself is an observable state and check() compares it

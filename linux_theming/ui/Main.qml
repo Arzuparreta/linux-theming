@@ -90,6 +90,7 @@ ApplicationWindow {
         case "save": exportPicker.open(); break
         case "review": controller.review(); break
         case "history": page = 2; break
+        case "copy": controller.copyText(s.problem.command); break
         case "access": controller.refreshLauncher(); accessDialog.open(); break
         default: controller.refresh()
         }

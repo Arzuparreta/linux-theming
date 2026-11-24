@@ -79,8 +79,11 @@ def non_colors(text):
         stripped = line.strip()
         if not stripped or stripped.startswith('#'):
             continue
-        if stripped.endswith('\\') or re.match(r'include\b', stripped):
+        directive = stripped.split(maxsplit=1)[0].lower()
+        if stripped.endswith('\\') or directive == 'include':
             raise ValueError('i3 includes or continued lines require manual reload.')
+        if directive == 'set_from_resource' or '$' in directive:
+            raise ValueError('i3 dynamic directives require manual configuration.')
         if re.fullmatch(r'client\.(?:focused|focused_inactive|unfocused|urgent|placeholder|focused_tab_title|background)\s+'
                         r'[^;{}]+', stripped):
             continue
@@ -98,6 +101,29 @@ def read(stream, path):
     return config['config']
 
 
+def socket_address(tool):
+    address = os.environ.get('I3SOCK', '')
+    if not address and os.environ.get('DISPLAY') and tool and Path(tool).is_file():
+        try:
+            address = subprocess.run([tool, '--get-socketpath'], capture_output=True, text=True,
+                                     timeout=3, check=True, env=wallpaper.host_environment()).stdout.strip()
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ValueError('No active i3 IPC socket was found.') from exc
+    if not Path(address).is_absolute():
+        raise ValueError('No active i3 IPC socket was found.')
+    return address
+
+
+def loaded_path(tool):
+    stream, _ = connect(socket_address(tool))
+    with stream:
+        info = request(stream, 7)
+    name = info.get('loaded_config_file_name', '') if isinstance(info, dict) else ''
+    if not isinstance(name, str) or not Path(name).is_absolute():
+        raise ValueError('i3 cannot report the path of its loaded configuration.')
+    return Path(os.path.normpath(name))
+
+
 def plan(paths, proposed, components, *, which=None):
     from . import changes
 
@@ -108,14 +134,7 @@ def plan(paths, proposed, components, *, which=None):
     if not item:
         return [], []
     try:
-        address = os.environ.get('I3SOCK', '')
-        if not address and os.environ.get('DISPLAY'):
-            tool = (which or shutil.which)('i3')
-            if tool and Path(tool).is_file():
-                address = subprocess.run([tool, '--get-socketpath'], capture_output=True, text=True,
-                                         timeout=3, check=True, env=wallpaper.host_environment()).stdout.strip()
-        if not address:
-            raise ValueError('No active i3 IPC socket was found.')
+        address = socket_address((which or shutil.which)('i3'))
         stream, identity = connect(address)
         with stream:
             before = read(stream, path)

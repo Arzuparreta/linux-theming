@@ -669,6 +669,12 @@ class Controller(QObject):
         profile["set_wallpaper"] = enabled
         self.edit(profile)
 
+    @Slot(bool)
+    def setWallpaperRestore(self, enabled):
+        profile = copy.deepcopy(self._state["profile"])
+        profile["restore_wallpaper"] = enabled
+        self.edit(profile)
+
     def remember(self, key, value):
         try:
             navigation.save(self.paths, key, value)
@@ -931,6 +937,10 @@ class Controller(QObject):
             plan = result["plan"]
             self._review = ("apply", plan)
             files = [dict(item, label=presentation.describe_file(self.paths, item)) for item in plan["changes"]]
+            if plan.get("wallpaper_copy"):
+                asset = plan["wallpaper_copy"]
+                files.append({"label": "Saved wallpaper copy", "path": asset["path"],
+                              "diff": f"Image: {asset['source']}\nSHA-256: {asset['sha256']}\n"})
             if plan.get("wallpaper_action"):
                 files.append(wallpaper.describe(plan["wallpaper_action"]))
             files.extend(appearance.describe(action) for action in plan.get("settings_actions", []))

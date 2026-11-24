@@ -97,7 +97,7 @@ def review_level(paths, plan, previous):
     """Only established, unchanged management scope gets a compact presentation."""
     profile = plan["profile"]
     if not paths.profile.is_file() or any(profile[key] != previous[key]
-            for key in ("components", "resolutions", "set_wallpaper")):
+            for key in ("components", "resolutions", "set_wallpaper", "restore_wallpaper")):
         return "attention"
     for component in profile["components"]:
         record = paths.ownership(component)
@@ -228,6 +228,10 @@ def review_items(paths, plan, previous):
     result.extend(item(note, "attention", "i3") for note in plan.get("activation_notes", []))
     if plan.get("wallpaper_action"):
         result.append(item("Set the selected image as your desktop wallpaper. Previous backgrounds are kept for undo.", "attention"))
+    if plan["profile"]["restore_wallpaper"] != previous["restore_wallpaper"]:
+        text = ("Restore this wallpaper when you next log in to i3."
+                if plan["profile"]["restore_wallpaper"] else "Stop restoring the wallpaper when you log in to i3.")
+        result.append(item(text, "attention", "i3"))
     return result
 
 
@@ -235,6 +239,8 @@ def describe_file(paths, item):
     path = Path(item["path"])
     if path == paths.profile:
         return "Palette and application choices"
+    if path == paths.config / "linux-theming/restore-wallpaper.sh":
+        return "Wallpaper startup script"
     if path.parent == paths.config / "linux-theming/themes":
         return f"{path.stem.title()} palette"
     if path.parent == paths.config / "linux-theming/ownership":
@@ -243,6 +249,10 @@ def describe_file(paths, item):
 
 
 def problem(context, detail):
+    if context == "review" and detail.startswith("Add this line to your i3 configuration at "):
+        instructions, _, command = detail.partition("\n")
+        return {"title": "Add the i3 startup command", "body": instructions,
+                "action": "copy", "label": "Copy command", "command": command}
     if context == "folder":
         return {"title": "Cannot read this image folder", "body": "Choose another folder or check its permissions.",
                 "action": "folder", "label": "Choose folder…"}

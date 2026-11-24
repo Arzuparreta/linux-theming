@@ -11,10 +11,12 @@ from . import (
     ownership,
     theme,
     wallpaper,
+    wallpaper_startup,
 )
 
 DEFAULT_PROFILE = {"version": 1, "components": [], "wallpaper": "",
-                   "mode": "adaptive", "polarity": "dark", "resolutions": {}, "set_wallpaper": False}
+                   "mode": "adaptive", "polarity": "dark", "resolutions": {}, "set_wallpaper": False,
+                   "restore_wallpaper": False}
 
 
 def validate_profile(value):
@@ -38,8 +40,9 @@ def validate_profile(value):
                 or not isinstance(options.get("replace_colors", False), bool)
                 or options.get("symlink", "preserve") not in ("preserve", "detach")):
             raise ValueError("Use replace_colors boolean and symlink preserve/detach resolutions.")
-    if not isinstance(result["set_wallpaper"], bool):
-        raise ValueError("set_wallpaper must be a boolean.")
+    for key in ("set_wallpaper", "restore_wallpaper"):
+        if not isinstance(result[key], bool):
+            raise ValueError(f"{key} must be a boolean.")
     image = result["wallpaper"]
     if not isinstance(image, str) or any(c in image for c in "\r\n\0"):
         raise ValueError("Invalid wallpaper path.")
@@ -91,7 +94,16 @@ def make_plan(paths, profile, *, which=None):
         if available[component]["installed"] is False:
             raise ValueError(f"{component} is not on PATH. Install it explicitly before "
                              "selecting this integration; no packages have been installed.")
-    value = theme.palette(profile)
+    palette_profile = profile
+    if (previous["restore_wallpaper"] and profile["wallpaper"]
+            and profile["wallpaper"] == previous["wallpaper"] and not Path(profile["wallpaper"]).is_file()):
+        record = wallpaper_startup.load(paths)
+        if record:
+            cached = wallpaper_startup.verify_asset(paths, record["image"])
+            # The copy may have come from an earlier selection if the last apply was colors-only.
+            if record.get("source") == profile["wallpaper"]:
+                palette_profile = dict(profile, wallpaper=str(cached))
+    value = theme.palette(palette_profile)
     proposed, warnings, inputs, inspections, settings_actions = [], [], [], {}, []
 
     def propose(path, content):
@@ -208,8 +220,11 @@ def make_plan(paths, profile, *, which=None):
             warnings.append(f"{component}: replace the reviewed direct colors/color-only includes. "
                             "Their source files remain unchanged; disconnection retains restoration data.")
     wallpaper_action = None
-    if profile["set_wallpaper"] and profile["wallpaper"] and "swaybg" not in profile["components"]:
-        detected = wallpaper.detect(paths, profile["wallpaper"], which=which)
+    disabling_startup = previous["restore_wallpaper"] and not profile["restore_wallpaper"]
+    same_wallpaper = all(previous[key] == profile[key] for key in ("wallpaper", "set_wallpaper"))
+    if (profile["set_wallpaper"] and profile["wallpaper"] and "swaybg" not in profile["components"]
+            and not (disabling_startup and same_wallpaper)):
+        detected = wallpaper.detect(paths, palette_profile["wallpaper"], which=which)
         if not detected["available"]:
             raise ValueError("Cannot change desktop wallpaper: " + "; ".join(detected["reasons"]) +
                              " Switch off 'Desktop wallpaper' on the Theme page to apply colors only.")
@@ -219,6 +234,8 @@ def make_plan(paths, profile, *, which=None):
                             "last configured image from .fehbg, not the current unregistered background.")
         if wallpaper_action["before"] == wallpaper_action["after"]:
             wallpaper_action = None
+    wallpaper_copy = wallpaper_startup.plan(paths, profile, previous, wallpaper_action,
+                                           proposed, inputs, warnings, which=which)
     profile_change = changes.change(paths.profile, json.dumps(profile, indent=2) + "\n", paths.config)
     if profile_change:
         proposed.append(profile_change)
@@ -233,6 +250,8 @@ def make_plan(paths, profile, *, which=None):
                "configuration": inspections, "wallpaper_action": wallpaper_action,
                "settings_actions": settings_actions, "activation_actions": activation_actions,
                "activation_notes": activation_notes}
+    if wallpaper_copy:
+        payload["wallpaper_copy"] = wallpaper_copy
     return dict(payload, id=changes.digest(payload))
 
 

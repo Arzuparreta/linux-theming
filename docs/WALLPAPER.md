@@ -51,12 +51,12 @@ before application. Actions and previous values are retained in the same private
 journal as file changes. Partial setting failures roll back completed settings
 and files; interrupted work is recovered through History. Later external edits,
 changed output sets and changed/missing restoration images block restoration.
-Original image files must remain available. Images are referenced, not copied;
-there is no new startup service. swww/awww and legacy hyprpaper queries do
+Original image files must remain available for live restoration unless the i3
+option below saved a private copy. swww/awww and legacy hyprpaper queries do
 not report prior scaling or animation options; undo restores their source
 images using the adapter defaults, not those unqueryable options. Native desktop settings persist according to
-the desktop's behavior. feh backgrounds last for the current X11 session; the
-user's existing startup script is deliberately unchanged.
+the desktop's behavior. With the default settings, feh backgrounds last for the
+current X11 session.
 
 Feh has no query API returning its current source image. On first use its
 existing `.fehbg` record is assumed to describe the root background; the X11
@@ -74,6 +74,35 @@ in that case. Root output/layout changes and desktop slideshows can likewise
 produce conflicts. External tools can race a setting between the last check and
 the setter; these APIs do not provide atomic compare-and-set.
 
+## Restore the wallpaper at i3 login
+
+In an active i3 X11 session, choose a desktop wallpaper, turn on **Restore
+wallpaper at login**, then review and approve. The app adds a single i3 startup
+command to the active per-user config and validates the proposed syntax. The
+command runs a generated script once on login using host `feh` and `xprop`.
+It works with the AppImage closed and leaves `~/.fehbg` intact. The initial
+live change still needs a restorable previous background as described above.
+
+If i3 starts a simple `wal -R` command, the reviewed change adds `-n` so
+Pywal restores its colors without setting the wallpaper. Other recognized
+wallpaper startup commands must be resolved manually. For linked, included,
+or custom config outside the XDG config directory, the review provides a
+command to add yourself. Check included files, startup scripts and any session
+autostart manager for wallpaper commands while adding it.
+
+Each applied wallpaper is saved under `$XDG_DATA_HOME/linux-theming/wallpapers`
+(default `~/.local/share/linux-theming/wallpapers`). The script selects a copy
+by its content hash. Moving or removing the original image does not affect
+login. Copies are retained for History and identical images share one copy.
+At login, a marker binds the restored image to its X11 pixmap so the next
+wallpaper change can use it as a previous background. Live History undo still
+checks the session and pixmap of the reviewed change.
+
+Turn the option off and approve to remove the app's startup command and restore
+its original Pywal line. Other edits are preserved and edits to managed lines
+stop the operation. With a manual hook, disabling removes the script and the
+hook can be deleted from your configuration.
+
 ## Validation and protocol references
 
 Unit tests use disposable HOME/XDG trees and mocked desktop commands. They
@@ -87,6 +116,9 @@ reviewed first-use apply on an uninitialized root, undo and failure rollback
 against its own private Xvfb with
 temporary HOME/XDG directories. It never sets wallpaper on the caller's display.
 `--smoke-test-feh` only decodes a temporary image with host feh and needs no Xvfb.
+The i3 startup tests use two private Xvfb sessions to validate actual login
+with the original wallpaper removed, and cover disable, manual hooks and
+managed-line conflicts.
 
 Protocol references: [Plasma scripting API](https://develop.kde.org/docs/plasma/scripting/api/),
 [swww source and manuals](https://github.com/LGFae/swww),

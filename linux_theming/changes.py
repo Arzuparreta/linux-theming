@@ -298,6 +298,10 @@ def apply(paths, plan, *, already_locked=False):
             wallpaper.check(action, "before")
         if not plan["changes"] and not action and not settings:
             return {"id": None, "status": "unchanged"}
+        if plan.get("wallpaper_copy"):
+            from . import wallpaper_startup
+
+            wallpaper_startup.stage_asset(paths, plan["wallpaper_copy"])
         ident = uuid.uuid4().hex
         journal = {"id": ident, "created": datetime.now(timezone.utc).isoformat(),
                    "status": "prepared", "components": plan["profile"]["components"],
@@ -386,6 +390,10 @@ def review_undo(paths, ident, *, recover=False):
         # Later edits outside the app are kept unless they touch what we restore.
         restored = carry(target, item["after"], current, item["before"], integrations.merger(paths, target))
         check_restoration_target(target, restored)
+        if target == paths.ownership("wallpaper-startup") and restored["kind"] == "file":
+            from . import wallpaper_startup
+
+            wallpaper_startup.verify_asset(paths, json.loads(text_of(restored))["image"])
         reverse = replacement(target, restored, root, before=current)
         if reverse:
             proposed.append(reverse)

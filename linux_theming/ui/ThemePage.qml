@@ -652,6 +652,23 @@ Item {
                                         onToggled: page.controller.setWallpaperEnabled(checked)
                                     }
                                 }
+                                SettingRow {
+                                    title: "Restore wallpaper at login"
+                                    caption: "i3 restores the last applied background from a saved copy."
+                                    visible: page.s.profile.restore_wallpaper || page.s.applied.restore_wallpaper
+                                        || (page.overview.session.type === "x11"
+                                            && page.overview.components.some(c => c.id === "i3" && c.current_session))
+                                    Toggle {
+                                        objectName: "restoreDesktopWallpaper"
+                                        Layout.preferredWidth: 46
+                                        Accessible.name: "Restore wallpaper at login"
+                                        checked: !!page.s.profile.restore_wallpaper
+                                        enabled: !page.s.busy && page.s.loaded && (checked
+                                                 || page.s.applied.restore_wallpaper
+                                                 || (page.s.profile.set_wallpaper && !!page.s.profile.wallpaper))
+                                        onToggled: page.controller.setWallpaperRestore(checked)
+                                    }
+                                }
                             }
                     }
                 }
