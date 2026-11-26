@@ -408,6 +408,7 @@ ApplicationWindow {
                               + (window.addedApps.length ? " · adds " + window.addedApps.map(componentName).join(", ") : "")
                               + (window.removedApps.length ? " · restores " + window.removedApps.map(componentName).join(", ") : "")
                               + (s.profile.set_wallpaper && s.profile.wallpaper && s.profile.wallpaper !== s.applied.wallpaper ? " · sets wallpaper" : "")
+                              + (s.profile.restore_wallpaper !== s.applied.restore_wallpaper ? (s.profile.restore_wallpaper ? " · restores at login" : " · stops login restore") : "")
                             : !s.hasApplied ? "Nothing applied by Linux Theming yet"
                             : s.profile.components.length ? "Used by " + s.profile.components.map(componentName).join(", ") : "Palette only"
                         color: Theme.textFaint

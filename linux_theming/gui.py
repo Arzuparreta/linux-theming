@@ -131,7 +131,9 @@ class Controller(QObject):
                        "applied": copy.deepcopy(service.DEFAULT_PROFILE), "pending": False,
                        "hasApplied": self.paths.profile.exists(), "activation": [],
                        "launcher": {}, "shortcut": "",
-                       "overview": {"components": [], "history": [], "session": {"desktop": "Unknown", "type": "unknown"}},
+                       "overview": {"components": [], "history": [], "session": {"desktop": "Unknown", "type": "unknown"},
+                                    "wallpaper_startup": {"available": False, "id": "", "name": "", "mode": "none",
+                                                          "config": "", "hook": "", "script": "", "native": False}},
                        "profile": dict(copy.deepcopy(service.DEFAULT_PROFILE), set_wallpaper=True), "palette": {},
                        "review": {}, "exportText": "", "exportComponent": "", "wallpaperUrl": "", "connection": {}, "problem": {}, "activity": "",
                        "update": self.initial_update()}

@@ -195,6 +195,10 @@ def merger(paths, path):
                 return merge.lines
         except ValueError:
             continue
+    from . import wallpaper_startup
+
+    if wallpaper_startup.is_config_path(paths, path):
+        return merge.lines
     return None
 
 

@@ -228,10 +228,19 @@ def review_items(paths, plan, previous):
     result.extend(item(note, "attention", "i3") for note in plan.get("activation_notes", []))
     if plan.get("wallpaper_action"):
         result.append(item("Set the selected image as your desktop wallpaper. Previous backgrounds are kept for undo.", "attention"))
+    startup = plan.get("wallpaper_startup_target") or {}
+    wm = startup.get("name", "")
     if plan["profile"]["restore_wallpaper"] != previous["restore_wallpaper"]:
-        text = ("Restore this wallpaper when you next log in to i3."
-                if plan["profile"]["restore_wallpaper"] else "Stop restoring the wallpaper when you log in to i3.")
-        result.append(item(text, "attention", "i3"))
+        if plan["profile"]["restore_wallpaper"]:
+            if startup.get("mode") == "manual":
+                text = f"Save a login wallpaper script for {wm}. You will add its command to your startup config."
+            elif wm:
+                text = f"Restore this wallpaper when you next log in to {wm}."
+            else:
+                text = "Restore this wallpaper when you next log in."
+        else:
+            text = f"Stop restoring the wallpaper when you log in to {wm}." if wm else "Stop restoring the wallpaper when you log in."
+        result.append(item(text, "attention", wm))
     return result
 
 
@@ -245,14 +254,29 @@ def describe_file(paths, item):
         return f"{path.stem.title()} palette"
     if path.parent == paths.config / "linux-theming/ownership":
         return f"{path.stem.title()} restoration data"
+    wm_labels = {
+        paths.config / "i3/config": "i3 configuration",
+        paths.config / "bspwm/bspwmrc": "bspwm configuration",
+        paths.config / "openbox/autostart": "Openbox autostart",
+        paths.config / "sway/config": "Sway configuration",
+        paths.config / "hypr/hyprland.conf": "Hyprland configuration",
+        paths.config / "niri/config.kdl": "Niri configuration",
+        paths.config / "river/init": "River init script",
+        paths.config / "labwc/autostart": "labwc autostart",
+    }
+    if path in wm_labels:
+        return wm_labels[path]
+    if path.name == "config" and path.parent.name in ("i3", ".i3"):
+        return "i3 configuration"
     return f"{path.parent.name.title()} configuration"
 
 
 def problem(context, detail):
-    if context == "review" and detail.startswith("Add this line to your i3 configuration at "):
+    if context == "review" and detail.startswith("Add this line to your ") and "\n" in detail:
         instructions, _, command = detail.partition("\n")
-        return {"title": "Add the i3 startup command", "body": instructions,
-                "action": "copy", "label": "Copy command", "command": command}
+        target = instructions.split("Add this line to your ", 1)[1].split(" configuration", 1)[0]
+        return {"title": f"Add the {target} startup command" if target else "Add the startup command",
+                "body": instructions, "action": "copy", "label": "Copy command", "command": command}
     if context == "folder":
         return {"title": "Cannot read this image folder", "body": "Choose another folder or check its permissions.",
                 "action": "folder", "label": "Choose folder…"}

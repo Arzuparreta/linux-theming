@@ -100,9 +100,10 @@ Item {
 
         // Image library
         ColumnLayout {
+            Layout.fillWidth: false
             Layout.fillHeight: true
-            Layout.preferredWidth: Math.max(280, Math.min(400, page.width * 0.36))
-            Layout.maximumWidth: 400
+            Layout.preferredWidth: Math.max(280, Math.min(380, page.width * 0.32))
+            Layout.maximumWidth: 380
             spacing: 10
             RowLayout {
                 Layout.fillWidth: true
@@ -653,11 +654,23 @@ Item {
                                     }
                                 }
                                 SettingRow {
+                                    id: restoreWallpaperRow
+                                    objectName: "restoreWallpaperRow"
+                                    readonly property var startup: page.overview.wallpaper_startup || ({})
                                     title: "Restore wallpaper at login"
-                                    caption: "i3 restores the last applied background from a saved copy."
+                                    caption: {
+                                        if (page.s.profile.restore_wallpaper) {
+                                            if (startup.mode === "manual")
+                                                return startup.name ? "Saves a startup script for " + startup.name + ". Review shows the command to add." : "Saves a startup script for your login config."
+                                            return startup.name ? startup.name + " restores the last applied background from a saved copy." : "Restores the last applied background from a saved copy."
+                                        }
+                                        if (page.s.profile.set_wallpaper && page.s.profile.wallpaper)
+                                            return "Off: wallpaper applies to this session only and resets on reboot."
+                                        return startup.name ? "Have " + startup.name + " restore the applied wallpaper at login." : "Restore the applied wallpaper when logging in."
+                                    }
+                                    captionColor: !page.s.profile.restore_wallpaper && page.s.profile.set_wallpaper && page.s.profile.wallpaper ? Theme.warning : Theme.textFaint
                                     visible: page.s.profile.restore_wallpaper || page.s.applied.restore_wallpaper
-                                        || (page.overview.session.type === "x11"
-                                            && page.overview.components.some(c => c.id === "i3" && c.current_session))
+                                        || (!!startup.available && page.s.profile.components.indexOf("swaybg") < 0)
                                     Toggle {
                                         objectName: "restoreDesktopWallpaper"
                                         Layout.preferredWidth: 46

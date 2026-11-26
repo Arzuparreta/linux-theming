@@ -84,8 +84,10 @@ def session(environ=None):
     # Wayland sessions often also expose DISPLAY through Xwayland.
     return {"type": session_type, "desktop": desktop or "Unknown",
             "name": env.get("XDG_SESSION_DESKTOP", ""),
+            "desktop_session": env.get("DESKTOP_SESSION", ""),
             "sway_socket": bool(env.get("SWAYSOCK")),
             "hyprland_instance": bool(env.get("HYPRLAND_INSTANCE_SIGNATURE")),
+            "niri_socket": bool(env.get("NIRI_SOCKET")),
             "i3_socket": bool(env.get("I3SOCK"))}
 
 

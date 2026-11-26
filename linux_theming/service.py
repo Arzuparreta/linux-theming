@@ -232,10 +232,10 @@ def make_plan(paths, profile, *, which=None):
         if wallpaper_action.get("uninitialized_root"):
             warnings.append("X11 has no registered wallpaper in this session. Undo will restore the "
                             "last configured image from .fehbg, not the current unregistered background.")
-        if wallpaper_action["before"] == wallpaper_action["after"]:
-            wallpaper_action = None
-    wallpaper_copy = wallpaper_startup.plan(paths, profile, previous, wallpaper_action,
-                                           proposed, inputs, warnings, which=which)
+    wallpaper_copy, startup_target = wallpaper_startup.plan(
+        paths, profile, previous, wallpaper_action, proposed, inputs, warnings, which=which)
+    if wallpaper_action and wallpaper_action["before"] == wallpaper_action["after"]:
+        wallpaper_action = None
     profile_change = changes.change(paths.profile, json.dumps(profile, indent=2) + "\n", paths.config)
     if profile_change:
         proposed.append(profile_change)
@@ -250,7 +250,9 @@ def make_plan(paths, profile, *, which=None):
                "configuration": inspections, "wallpaper_action": wallpaper_action,
                "settings_actions": settings_actions, "activation_actions": activation_actions,
                "activation_notes": activation_notes}
-    if wallpaper_copy:
+    if startup_target:
+        payload["wallpaper_startup_target"] = startup_target
+    if wallpaper_copy and (proposed or wallpaper_action or not Path(wallpaper_copy["path"]).is_file()):
         payload["wallpaper_copy"] = wallpaper_copy
     return dict(payload, id=changes.digest(payload))
 
@@ -272,4 +274,5 @@ def overview(paths):
     result = inventory.discover(paths)
     result["profile"] = load_profile(paths)
     result["history"] = changes.history(paths)
+    result["wallpaper_startup"] = wallpaper_startup.detect_target(paths)
     return result

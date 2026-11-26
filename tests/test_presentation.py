@@ -109,3 +109,24 @@ class PresentationTests(unittest.TestCase):
             self.assertEqual(problem["title"], "Theme settings were changed outside the app")
             self.assertEqual(problem["action"], "refresh")
         self.assertNotIn("after review", presentation.problem("restore", "edited after application")["title"])
+
+    def test_wallpaper_startup_problem_review_items_and_file_labels(self):
+        detail = ("Add this line to your Hyprland configuration at /home/u/.config/hypr/hyprland.conf, "
+                  "then review again.\nexec-once = /bin/sh /home/u/.config/linux-theming/restore-wallpaper.sh")
+        problem = presentation.problem("review", detail)
+        self.assertEqual(problem["title"], "Add the Hyprland startup command")
+        self.assertEqual(problem["action"], "copy")
+        self.assertIn("exec-once =", problem["command"])
+        self.assertEqual(presentation.describe_file(self.paths, {"path": str(self.paths.config / "niri/config.kdl")}),
+                         "Niri configuration")
+        self.assertEqual(presentation.describe_file(self.paths, {"path": str(self.paths.config / "bspwm/bspwmrc")}),
+                         "bspwm configuration")
+        plan = service.make_plan(self.paths, service.DEFAULT_PROFILE)
+        manual_plan = dict(plan, profile=dict(service.DEFAULT_PROFILE, restore_wallpaper=True),
+                           wallpaper_startup_target={"id": "manual", "name": "dwm", "mode": "manual"})
+        items = presentation.review_items(self.paths, manual_plan, service.DEFAULT_PROFILE)
+        self.assertTrue(any("dwm" in item["text"] and item["tone"] == "attention" for item in items))
+        auto_plan = dict(plan, profile=dict(service.DEFAULT_PROFILE, restore_wallpaper=True),
+                         wallpaper_startup_target={"id": "niri", "name": "Niri", "mode": "auto"})
+        items = presentation.review_items(self.paths, auto_plan, service.DEFAULT_PROFILE)
+        self.assertTrue(any("log in to Niri" in item["text"] for item in items))

@@ -1449,3 +1449,46 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(self.controller.state["palette"]["polarity"], "light")
         self.assertEqual(self.controller.state["profile"]["components"], [])
         self.assertFalse(self.paths.profile.exists())
+
+    def test_restore_wallpaper_row_follows_session_and_stays_in_daily_view(self):
+        from PIL import Image
+
+        folder = self.root / "wallpapers"
+        folder.mkdir()
+        image = folder / "pic.png"
+        Image.new("RGB", (16, 16), "#335577").save(image)
+        (self.paths.config / "sway").mkdir(parents=True)
+        (self.paths.config / "sway/config").write_text("font pango:monospace 9\n")
+
+        sessions = (
+            ({"XDG_SESSION_TYPE": "x11", "XDG_CURRENT_DESKTOP": "i3", "DISPLAY": ":0"}, True, "i3"),
+            ({"XDG_SESSION_TYPE": "wayland", "XDG_CURRENT_DESKTOP": "Hyprland", "WAYLAND_DISPLAY": "wayland-1"}, True, "Hyprland"),
+            ({"XDG_SESSION_TYPE": "wayland", "XDG_CURRENT_DESKTOP": "niri", "WAYLAND_DISPLAY": "wayland-1"}, True, "Niri"),
+            ({"XDG_SESSION_TYPE": "x11", "XDG_CURRENT_DESKTOP": "dwm", "DISPLAY": ":0"}, True, "dwm"),
+            ({"XDG_SESSION_TYPE": "wayland", "XDG_CURRENT_DESKTOP": "GNOME", "WAYLAND_DISPLAY": "wayland-1"}, False, ""),
+        )
+        for env, expected_visible, expected_name in sessions:
+            with patch.dict(os.environ, env):
+                self.controller.refresh()
+                self.settle()
+                self.assertEqual(self.control("restoreWallpaperRow").property("visible"), expected_visible)
+                self.assertEqual(self.controller.state["overview"]["wallpaper_startup"]["name"], expected_name)
+
+        with patch.dict(os.environ, {"XDG_SESSION_TYPE": "x11", "XDG_CURRENT_DESKTOP": "i3", "DISPLAY": ":0"}):
+            self.controller.refresh()
+            self.settle()
+            self.choose_folder(folder, 1)
+            self.click("image-row-0")
+            self.window.setWidth(980)
+            self.window.setHeight(780)
+            self.window.setProperty("dailyMode", True)
+            self.app.processEvents()
+            row = self.control("restoreWallpaperRow")
+            scroll = self.control("appearanceScroll")
+            self.assertTrue(row.property("visible"))
+            bottom = row.mapToItem(scroll, QPoint(0, row.height())).y()
+            self.assertLessEqual(bottom, scroll.height())
+            self.assertIn("resets on reboot", row.property("caption"))
+            self.controller.selectComponent("swaybg", True)
+            self.settle()
+            self.assertFalse(row.property("visible"))
